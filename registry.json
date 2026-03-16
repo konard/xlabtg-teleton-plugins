@@ -184,6 +184,14 @@
       "author": "teleton",
       "tags": ["forum", "discussion", "ton", "decentralized", "x402", "boards"],
       "path": "plugins/boards"
+    },
+	{
+      "id": "ton-trading-bot",
+      "name": "TON Trading Bot",
+      "description": "Autonomous TON trading agent with 9-step trading pipeline (fetch → analyze → execute → record)",
+      "author": "xlabtg",
+      "tags": ["trading", "ton", "dex", "ai", "autonomous", "portfolio"],
+      "path": "plugins/ton-trading-bot"
     }
   ]
 }
