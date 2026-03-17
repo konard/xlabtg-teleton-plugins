@@ -1,8 +1,8 @@
 /**
- * TON Bridge Plugin
+ * TON Bridge Plugin — inline-native architecture
  *
- * Provides a beautiful inline button to open TON Bridge Mini App
- * Official Mini App: https://t.me/TONBridge_robot?startapp
+ * Tools return structured inline result objects; no direct message sending.
+ * The agent delivers results via answerInlineQuery.
  *
  * DEVELOPED BY TONY (AI AGENT) UNDER SUPERVISION OF ANTON POROSHIN
  * DEVELOPMENT STUDIO: https://github.com/xlabtg
@@ -10,19 +10,23 @@
 
 export const manifest = {
   name: "ton-bridge",
-  version: "1.0.0",
+  version: "1.1.0",
   sdkVersion: ">=1.0.0",
-  description: "TON Bridge plugin with inline button for Mini App access. Opens https://t.me/TONBridge_robot?startapp with beautiful button 'TON Bridge No1'. Developed by Tony (AI Agent) under supervision of Anton Poroshin.",
+  description:
+    "TON Bridge inline-native plugin. Returns structured inline results for opening https://t.me/TONBridge_robot?startapp. Developed by Tony (AI Agent) under supervision of Anton Poroshin.",
   author: {
     name: "Tony (AI Agent)",
     role: "AI Developer",
     supervisor: "Anton Poroshin",
-    link: "https://github.com/xlabtg"
+    link: "https://github.com/xlabtg",
+  },
+  bot: {
+    inline: true,
   },
   defaultConfig: {
     enabled: true,
     buttonText: "TON Bridge No1",
-    buttonEmoji: "",  // Empty emoji - no icon on button
+    buttonEmoji: "",
     startParam: "",
   },
 };
@@ -31,197 +35,232 @@ export function migrate(db) {
   // No database required for this plugin
 }
 
-export const tools = (sdk) => [
-  // ── Tool: ton_bridge_open ──────────────────────────────────────────────
-  {
-    name: "ton_bridge_open",
-    description:
-      "Open TON Bridge Mini App with a beautiful inline button. The button will be added to the message with text 'TON Bridge No1' as per your request.",
-    category: "action",
-    parameters: {
-      type: "object",
-      properties: {
-        message: {
-          type: "string",
-          description: "Optional message to send before the button",
-          minLength: 1,
-          maxLength: 500,
+export const tools = (sdk) => {
+  const MINI_APP_URL = "https://t.me/TONBridge_robot?startapp";
+
+  /**
+   * Build the inline_keyboard reply_markup for the TON Bridge button.
+   */
+  function buildReplyMarkup(buttonText, buttonEmoji, startParam) {
+    const label =
+      buttonEmoji ? `${buttonEmoji} ${buttonText}` : buttonText;
+    const url = startParam
+      ? `${MINI_APP_URL}=${encodeURIComponent(startParam)}`
+      : MINI_APP_URL;
+    return {
+      inline_keyboard: [[{ text: label, url }]],
+    };
+  }
+
+  // Register inline query handler — fires when user types @botname <query>
+  sdk.bot.onInlineQuery(async (ctx) => {
+    const query = (ctx.query ?? "").trim().toLowerCase();
+    const buttonText = sdk.pluginConfig.buttonText ?? "TON Bridge No1";
+    const buttonEmoji = sdk.pluginConfig.buttonEmoji ?? "";
+    const startParam = sdk.pluginConfig.startParam ?? "";
+
+    const replyMarkup = buildReplyMarkup(buttonText, buttonEmoji, startParam);
+
+    // Result 1: Open TON Bridge
+    const openResult = {
+      id: "ton_bridge_open",
+      type: "article",
+      title: "🌉 Open TON Bridge",
+      description: "Open TON Bridge Mini App",
+      input_message_content: {
+        message_text: "🌉 **TON Bridge** — The #1 Bridge in the TON Catalog\n\nClick the button below to open TON Bridge Mini App.",
+        parse_mode: "Markdown",
+      },
+      reply_markup: replyMarkup,
+    };
+
+    // Result 2: About TON Bridge
+    const aboutResult = {
+      id: "ton_bridge_about",
+      type: "article",
+      title: "ℹ️ About TON Bridge",
+      description: "Info about TON Bridge Mini App",
+      input_message_content: {
+        message_text: "ℹ️ **About TON Bridge**\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.",
+        parse_mode: "Markdown",
+      },
+      reply_markup: replyMarkup,
+    };
+
+    // Result 3: Custom message (shown when query is non-empty)
+    const customResult = query
+      ? {
+          id: "ton_bridge_custom",
+          type: "article",
+          title: `🌉 TON Bridge — ${ctx.query}`,
+          description: "Send custom message with TON Bridge button",
+          input_message_content: {
+            message_text: ctx.query,
+          },
+          reply_markup: replyMarkup,
+        }
+      : null;
+
+    const results = [openResult, aboutResult];
+    if (customResult) results.push(customResult);
+
+    // Filter by query alias if provided
+    if (query === "ton-bridge:open" || query === "ton_bridge_open") {
+      return [openResult];
+    }
+    if (query === "ton-bridge:about" || query === "ton_bridge_about") {
+      return [aboutResult];
+    }
+
+    return results;
+  });
+
+  return [
+    // ── Tool: ton_bridge_open ──────────────────────────────────────────────
+    {
+      name: "ton_bridge_open",
+      description:
+        "Return an inline result to open TON Bridge Mini App. The result contains a button labeled 'TON Bridge No1' that opens https://t.me/TONBridge_robot?startapp. Use this tool when the user asks to open or access the TON Bridge.",
+      category: "action",
+      parameters: {
+        type: "object",
+        properties: {
+          message: {
+            type: "string",
+            description: "Optional message text to display with the button",
+            minLength: 1,
+            maxLength: 500,
+          },
         },
       },
-    },
-    execute: async (params, context) => {
-      const { message = "" } = params;
+      execute: async (params, context) => {
+        try {
+          const buttonText = sdk.pluginConfig.buttonText ?? "TON Bridge No1";
+          const buttonEmoji = sdk.pluginConfig.buttonEmoji ?? "";
+          const startParam = sdk.pluginConfig.startParam ?? "";
 
-      try {
-        // Mini App URL
-        const miniAppUrl = "https://t.me/TONBridge_robot?startapp";
+          const replyMarkup = buildReplyMarkup(buttonText, buttonEmoji, startParam);
+          const label = buttonEmoji ? `${buttonEmoji} ${buttonText}` : buttonText;
 
-        // Get button text from config
-        const buttonText = sdk.pluginConfig.buttonText || "TON Bridge No1";
-        const buttonEmoji = sdk.pluginConfig.buttonEmoji || "";
+          const messageText =
+            params.message ??
+            "🌉 **TON Bridge** — The #1 Bridge in the TON Catalog\n\nClick the button below to open TON Bridge Mini App.";
 
-        // Create button with inline keyboard
-        const keyboard = {
-          inline_keyboard: [
-            [
-              {
-                text: `${buttonEmoji} ${buttonText}`,
-                url: miniAppUrl,
+          sdk.log.info(
+            `ton_bridge_open called by ${context.senderId} — button: "${label}"`
+          );
+
+          return {
+            success: true,
+            data: {
+              type: "article",
+              id: "ton_bridge",
+              title: "🌉 Open TON Bridge",
+              description: "Open TON Bridge Mini App",
+              input_message_content: {
+                message_text: messageText,
+                parse_mode: "Markdown",
               },
-            ],
-          ],
-        };
-
-        // Send message with button using inline send
-        if (message) {
-          await sdk.inline.send({
-            chatId: context.chatId,
-            text: message,
-            keyboard: keyboard,
-          });
-        } else {
-          await sdk.inline.send({
-            chatId: context.chatId,
-            text: `🌉 **TON Bridge** - The #1 Bridge in TON Catalog\n\nClick the button below to open TON Bridge Mini App.`,
-            keyboard: keyboard,
-            parse_mode: "Markdown",
-          });
-        }
-
-        sdk.log.info(
-          `TON Bridge opened for user ${context.chatId} with button: "${buttonText}"`
-        );
-
-        return {
-          success: true,
-          data: {
-            message_id: context.messageId,
-            mini_app_url: miniAppUrl,
-            button_text: buttonText,
-            button_emoji: buttonEmoji,
-            message_sent: message || "Welcome message with button",
-          },
-        };
-      } catch (err) {
-        sdk.log.error("ton_bridge_open failed:", err.message);
-        return { success: false, error: String(err.message).slice(0, 500) };
-      }
-    },
-  },
-
-  // ── Tool: ton_bridge_button_text ────────────────────────────────────────
-  {
-    name: "ton_bridge_button_text",
-    description:
-      "Get current button text configuration for TON Bridge. Useful for displaying what button will be shown to users.",
-    category: "data-bearing",
-    parameters: {
-      type: "object",
-      properties: {},
-    },
-    execute: async (params, context) => {
-      try {
-        const buttonText = sdk.pluginConfig.buttonText || "TON Bridge No1";
-        const buttonEmoji = sdk.pluginConfig.buttonEmoji || "";
-        const miniAppUrl = "https://t.me/TONBridge_robot?startapp";
-
-        return {
-          success: true,
-          data: {
-            button_text: buttonText,
-            button_emoji: buttonEmoji,
-            mini_app_url: miniAppUrl,
-            config: {
-              text: buttonText,
-              emoji: buttonEmoji,
-              url: miniAppUrl,
+              reply_markup: replyMarkup,
             },
-          },
-        };
-      } catch (err) {
-        sdk.log.error("ton_bridge_button_text failed:", err.message);
-        return { success: false, error: String(err.message).slice(0, 500) };
-      }
-    },
-  },
-
-  // ── Tool: ton_bridge_custom_message ─────────────────────────────────────
-  {
-    name: "ton_bridge_custom_message",
-    description:
-      "Send a custom message with TON Bridge button. Use this to provide context before showing the bridge button.",
-    category: "action",
-    parameters: {
-      type: "object",
-      properties: {
-        customMessage: {
-          type: "string",
-          description: "Custom message to display before the button",
-          minLength: 1,
-          maxLength: 500,
-        },
-        showWelcome: {
-          type: "boolean",
-          description: "Show welcome message after button (default: false)",
-          default: false,
-        },
+          };
+        } catch (err) {
+          sdk.log.error("ton_bridge_open failed:", err.message);
+          return { success: false, error: String(err.message || err).slice(0, 500) };
+        }
       },
     },
-    execute: async (params, context) => {
-      const { customMessage, showWelcome = false } = params;
 
-      try {
-        const miniAppUrl = "https://t.me/TONBridge_robot?startapp";
-        const buttonText = sdk.pluginConfig.buttonText || "TON Bridge No1";
-        const buttonEmoji = sdk.pluginConfig.buttonEmoji || "";
+    // ── Tool: ton_bridge_about ─────────────────────────────────────────────
+    {
+      name: "ton_bridge_about",
+      description:
+        "Return an inline result with info about TON Bridge. Includes a button to open the Mini App. Use this when the user asks about TON Bridge or wants more information.",
+      category: "data-bearing",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      execute: async (params, context) => {
+        try {
+          const buttonText = sdk.pluginConfig.buttonText ?? "TON Bridge No1";
+          const buttonEmoji = sdk.pluginConfig.buttonEmoji ?? "";
+          const startParam = sdk.pluginConfig.startParam ?? "";
 
-        // Create button with inline keyboard
-        const keyboard = {
-          inline_keyboard: [
-            [
-              {
-                text: `${buttonEmoji} ${buttonText}`,
-                url: miniAppUrl,
+          const replyMarkup = buildReplyMarkup(buttonText, buttonEmoji, startParam);
+
+          sdk.log.info(`ton_bridge_about called by ${context.senderId}`);
+
+          return {
+            success: true,
+            data: {
+              type: "article",
+              id: "ton_bridge_about",
+              title: "ℹ️ About TON Bridge",
+              description: "Info about TON Bridge Mini App",
+              input_message_content: {
+                message_text:
+                  "ℹ️ **About TON Bridge**\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.",
+                parse_mode: "Markdown",
               },
-            ],
-          ],
-        };
-
-        // Send custom message with button using inline send
-        await sdk.inline.send({
-          chatId: context.chatId,
-          text: customMessage,
-          keyboard: keyboard,
-        });
-
-        // Optionally send welcome message
-        if (showWelcome) {
-          await sdk.inline.send({
-            chatId: context.chatId,
-            text: `🌉 **TON Bridge**\n\nClick the button above to open the Mini App.\n\nThis is the #1 bridge in TON catalog according to your configuration.`,
-            parse_mode: "Markdown",
-          });
+              reply_markup: replyMarkup,
+            },
+          };
+        } catch (err) {
+          sdk.log.error("ton_bridge_about failed:", err.message);
+          return { success: false, error: String(err.message || err).slice(0, 500) };
         }
-
-        sdk.log.info(
-          `Custom TON Bridge message sent to user ${context.chatId}`
-        );
-
-        return {
-          success: true,
-          data: {
-            message_id: context.messageId,
-            mini_app_url: miniAppUrl,
-            button_text: buttonText,
-            button_emoji: buttonEmoji,
-            custom_message: customMessage,
-            welcome_message: showWelcome ? "Sent" : "Not sent",
-          },
-        };
-      } catch (err) {
-        sdk.log.error("ton_bridge_custom_message failed:", err.message);
-        return { success: false, error: String(err.message).slice(0, 500) };
-      }
+      },
     },
-  },
-];
+
+    // ── Tool: ton_bridge_custom_message ────────────────────────────────────
+    {
+      name: "ton_bridge_custom_message",
+      description:
+        "Return an inline result with a custom message and TON Bridge button. Use when the user wants to share a specific message alongside the TON Bridge button.",
+      category: "action",
+      parameters: {
+        type: "object",
+        properties: {
+          customMessage: {
+            type: "string",
+            description: "Custom message text to display with the button",
+            minLength: 1,
+            maxLength: 500,
+          },
+        },
+        required: ["customMessage"],
+      },
+      execute: async (params, context) => {
+        try {
+          const buttonText = sdk.pluginConfig.buttonText ?? "TON Bridge No1";
+          const buttonEmoji = sdk.pluginConfig.buttonEmoji ?? "";
+          const startParam = sdk.pluginConfig.startParam ?? "";
+
+          const replyMarkup = buildReplyMarkup(buttonText, buttonEmoji, startParam);
+
+          sdk.log.info(
+            `ton_bridge_custom_message called by ${context.senderId}`
+          );
+
+          return {
+            success: true,
+            data: {
+              type: "article",
+              id: "ton_bridge_custom",
+              title: "🌉 TON Bridge — Custom Message",
+              description: params.customMessage.slice(0, 100),
+              input_message_content: {
+                message_text: params.customMessage,
+              },
+              reply_markup: replyMarkup,
+            },
+          };
+        } catch (err) {
+          sdk.log.error("ton_bridge_custom_message failed:", err.message);
+          return { success: false, error: String(err.message || err).slice(0, 500) };
+        }
+      },
+    },
+  ];
+};
