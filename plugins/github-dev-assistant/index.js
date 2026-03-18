@@ -31,6 +31,33 @@ import { createGitHubClient } from "./lib/github-client.js";
 import { formatError } from "./lib/utils.js";
 
 // ---------------------------------------------------------------------------
+// Inline manifest — read by the Teleton runtime for SDK version gating,
+// defaultConfig merging, and secrets registration.
+// ---------------------------------------------------------------------------
+
+export const manifest = {
+  name: "github-dev-assistant",
+  version: "2.0.0",
+  sdkVersion: ">=1.0.0",
+  description:
+    "Full GitHub development workflow automation — repos, files, branches, PRs, issues, and GitHub Actions via Personal Access Token",
+  secrets: {
+    github_token: {
+      required: true,
+      env: "GITHUB_DEV_ASSISTANT_GITHUB_TOKEN",
+      description: "GitHub Personal Access Token (create at https://github.com/settings/tokens)",
+    },
+  },
+  defaultConfig: {
+    default_owner: null,
+    default_branch: "main",
+    require_pr_review: false,
+    commit_author_name: "Teleton AI Agent",
+    commit_author_email: "agent@teleton.local",
+  },
+};
+
+// ---------------------------------------------------------------------------
 // SDK export — Teleton runtime calls tools(sdk) and uses the returned array
 // ---------------------------------------------------------------------------
 
@@ -53,29 +80,43 @@ export const tools = (sdk) => {
         type: "object",
         properties: {},
       },
-      execute: async () => {
+      execute: async (_params, _context) => {
         try {
           const client = createGitHubClient(sdk);
           if (!client.isAuthenticated()) {
             return {
-              content:
-                "GitHub is not connected. Please set the github_token secret with your Personal Access Token. " +
-                "You can create one at https://github.com/settings/tokens",
+              success: true,
+              data: {
+                authenticated: false,
+                message:
+                  "GitHub is not connected. Please set the github_token secret with your Personal Access Token. " +
+                  "You can create one at https://github.com/settings/tokens",
+              },
             };
           }
           const user = await client.get("/user");
           sdk.log.info(`github_check_auth: authenticated as ${user.login}`);
           return {
-            content: `GitHub is connected. Authenticated as @${user.login} (${user.name ?? user.login}).`,
+            success: true,
+            data: {
+              authenticated: true,
+              message: `GitHub is connected. Authenticated as @${user.login} (${user.name ?? user.login}).`,
+              login: user.login,
+              name: user.name ?? null,
+            },
           };
         } catch (err) {
           if (err.status === 401) {
             return {
-              content:
-                "GitHub token is invalid or expired. Please update the github_token secret with a valid Personal Access Token.",
+              success: true,
+              data: {
+                authenticated: false,
+                message:
+                  "GitHub token is invalid or expired. Please update the github_token secret with a valid Personal Access Token.",
+              },
             };
           }
-          return { content: `GitHub auth check failed: ${formatError(err)}` };
+          return { success: false, error: `GitHub auth check failed: ${formatError(err)}` };
         }
       },
     },

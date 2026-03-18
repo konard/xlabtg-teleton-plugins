@@ -2,8 +2,11 @@
  * Integration tests for github-dev-assistant plugin.
  *
  * Tests full tool call flows using mocked GitHub API responses.
- * Verifies: tool input validation, API call construction, content output shape,
+ * Verifies: tool input validation, API call construction, ToolResult shape,
  * and the require_pr_review policy guard.
+ *
+ * All tools return { success, data?, error? } per the SDK ToolResult contract.
+ * Tools accept (params, context) per SimpleToolDef.execute signature.
  *
  * NOTE: Tools now take only sdk (not client + sdk). The GitHub client is
  * created internally per execution using sdk.secrets for the PAT token.
@@ -24,8 +27,7 @@ function makeSdk(config = {}, token = "ghp_testtoken") {
   return {
     secrets: {
       get: (key) => (key === "github_token" ? token : null),
-      set: vi.fn(),
-      delete: vi.fn(),
+      has: (key) => key === "github_token" && token !== null,
     },
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     pluginConfig: {
@@ -35,9 +37,11 @@ function makeSdk(config = {}, token = "ghp_testtoken") {
       require_pr_review: false,
       ...config,
     },
-    llm: { confirm: vi.fn() },
   };
 }
+
+// Fake context (PluginToolContext)
+const fakeContext = { chatId: "123", senderId: 1, isGroup: false };
 
 /**
  * Create a mock fetch that returns different responses based on
@@ -82,7 +86,7 @@ describe("github_list_repos", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("returns formatted list of repos for authenticated user", async () => {
+  it("returns repos list for authenticated user", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -102,21 +106,23 @@ describe("github_list_repos", () => {
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_list_repos");
-    const result = await tool.execute({});
+    const result = await tool.execute({}, fakeContext);
 
-    expect(result.content).toMatch(/hello/);
-    expect(result.content).toMatch(/JavaScript/);
-    expect(result.content).toMatch(/public/);
+    expect(result.success).toBe(true);
+    expect(result.data.repos).toHaveLength(1);
+    expect(result.data.repos[0].name).toBe("hello");
+    expect(result.data.repos[0].language).toBe("JavaScript");
+    expect(result.data.repos[0].private).toBe(false);
   });
 
-  it("returns error message for invalid type enum", async () => {
+  it("returns error for invalid type enum", async () => {
     const sdk = makeSdk();
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_list_repos");
 
-    const result = await tool.execute({ owner: "octocat", type: "not-valid" });
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/not-valid/);
+    const result = await tool.execute({ owner: "octocat", type: "not-valid" }, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not-valid/);
   });
 });
 
@@ -125,7 +131,7 @@ describe("github_create_repo", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("creates repo and returns URL in content", async () => {
+  it("creates repo and returns full_name and URL", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -141,20 +147,21 @@ describe("github_create_repo", () => {
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_create_repo");
-    const result = await tool.execute({ name: "new-repo", description: "Test" });
+    const result = await tool.execute({ name: "new-repo", description: "Test" }, fakeContext);
 
-    expect(result.content).toMatch(/new-repo/);
-    expect(result.content).toMatch(/github\.com/);
+    expect(result.success).toBe(true);
+    expect(result.data.full_name).toBe("octocat/new-repo");
+    expect(result.data.html_url).toMatch(/github\.com/);
   });
 
-  it("requires name parameter", async () => {
+  it("returns error when name parameter is missing", async () => {
     const sdk = makeSdk();
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_create_repo");
 
-    const result = await tool.execute({});
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/name/);
+    const result = await tool.execute({}, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/name/);
   });
 });
 
@@ -183,10 +190,12 @@ describe("github_get_file", () => {
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_get_file");
-    const result = await tool.execute({ owner: "octocat", repo: "hello", path: "README.md" });
+    const result = await tool.execute({ owner: "octocat", repo: "hello", path: "README.md" }, fakeContext);
 
-    expect(result.content).toMatch(/README\.md/);
-    expect(result.content).toMatch(/Hello, world!/);
+    expect(result.success).toBe(true);
+    expect(result.data.type).toBe("file");
+    expect(result.data.path).toBe("README.md");
+    expect(result.data.content).toBe("Hello, world!");
   });
 
   it("returns directory listing when path is a dir", async () => {
@@ -195,28 +204,31 @@ describe("github_get_file", () => {
       {
         match: "/contents/src",
         body: [
-          { name: "index.js", path: "src/index.js", type: "file", size: 100 },
-          { name: "utils.js", path: "src/utils.js", type: "file", size: 200 },
+          { name: "index.js", path: "src/index.js", type: "file", size: 100, sha: "a" },
+          { name: "utils.js", path: "src/utils.js", type: "file", size: 200, sha: "b" },
         ],
       },
     ]);
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_get_file");
-    const result = await tool.execute({ owner: "octocat", repo: "hello", path: "src" });
+    const result = await tool.execute({ owner: "octocat", repo: "hello", path: "src" }, fakeContext);
 
-    expect(result.content).toMatch(/index\.js/);
-    expect(result.content).toMatch(/utils\.js/);
+    expect(result.success).toBe(true);
+    expect(result.data.type).toBe("directory");
+    const names = result.data.entries.map((e) => e.name);
+    expect(names).toContain("index.js");
+    expect(names).toContain("utils.js");
   });
 
-  it("requires owner, repo, and path", async () => {
+  it("returns error when required params are missing", async () => {
     const sdk = makeSdk();
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_get_file");
 
-    const result = await tool.execute({ owner: "octocat" });
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/repo/);
+    const result = await tool.execute({ owner: "octocat" }, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/repo/);
   });
 });
 
@@ -225,7 +237,7 @@ describe("github_update_file", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("encodes content and returns success message", async () => {
+  it("encodes content and returns commit data", async () => {
     const sdk = makeSdk();
     let capturedBody;
     global.fetch = vi.fn().mockImplementation(async (url, opts) => {
@@ -248,11 +260,13 @@ describe("github_update_file", () => {
     const result = await tool.execute({
       owner: "octocat", repo: "hello", path: "README.md",
       content: "# Hello World", message: "Update README",
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/README\.md/);
-    expect(result.content).toMatch(/created|updated/i);
-    // Verify content was base64-encoded
+    expect(result.success).toBe(true);
+    expect(result.data.action).toBe("created");
+    expect(result.data.path).toBe("README.md");
+    expect(result.data.commit_url).toMatch(/github\.com/);
+    // Verify content was base64-encoded in the request
     expect(Buffer.from(capturedBody.content, "base64").toString()).toBe("# Hello World");
     expect(capturedBody.message).toBe("Update README");
     expect(capturedBody.committer.name).toBe("Test Agent");
@@ -264,7 +278,7 @@ describe("github_create_branch", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("creates branch from specified ref and returns confirmation", async () => {
+  it("creates branch from specified ref and returns branch data", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -284,10 +298,12 @@ describe("github_create_branch", () => {
     const tool = findTool(tools, "github_create_branch");
     const result = await tool.execute({
       owner: "octocat", repo: "hello", branch: "feat/new-feature", from_ref: "main",
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/feat\/new-feature/);
-    expect(result.content).toMatch(/main/);
+    expect(result.success).toBe(true);
+    expect(result.data.branch).toBe("feat/new-feature");
+    expect(result.data.from_ref).toBe("main");
+    expect(result.data.sha).toBe("base-sha-123");
   });
 });
 
@@ -300,7 +316,7 @@ describe("github_create_pr", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("creates PR and returns number + URL in content", async () => {
+  it("creates PR and returns number + URL", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -322,10 +338,11 @@ describe("github_create_pr", () => {
     const result = await tool.execute({
       owner: "octocat", repo: "hello",
       title: "Add feature", head: "feat/my-feature",
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/#7/);
-    expect(result.content).toMatch(/github\.com/);
+    expect(result.success).toBe(true);
+    expect(result.data.number).toBe(7);
+    expect(result.data.html_url).toMatch(/github\.com/);
   });
 });
 
@@ -334,7 +351,7 @@ describe("github_merge_pr - require_pr_review policy", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("merges without confirmation when require_pr_review is false", async () => {
+  it("merges successfully when require_pr_review is false", async () => {
     const sdk = makeSdk({ require_pr_review: false });
     global.fetch = mockFetchRoutes([
       {
@@ -346,15 +363,15 @@ describe("github_merge_pr - require_pr_review policy", () => {
 
     const tools = buildPRManagerTools(sdk);
     const tool = findTool(tools, "github_merge_pr");
-    const result = await tool.execute({ owner: "octocat", repo: "hello", pr_number: 7 });
+    const result = await tool.execute({ owner: "octocat", repo: "hello", pr_number: 7 }, fakeContext);
 
-    expect(result.content).toMatch(/merged/i);
-    expect(sdk.llm.confirm).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(result.data.pr_number).toBe(7);
+    expect(result.data.sha).toBe("merge-sha");
   });
 
-  it("asks for confirmation when require_pr_review is true", async () => {
+  it("returns error asking for confirmation when require_pr_review is true and confirmed not set", async () => {
     const sdk = makeSdk({ require_pr_review: true });
-    sdk.llm.confirm = vi.fn().mockResolvedValue(true); // user says yes
 
     global.fetch = mockFetchRoutes([
       {
@@ -364,48 +381,24 @@ describe("github_merge_pr - require_pr_review policy", () => {
           head: { label: "feat", sha: "abc" }, base: { label: "main" },
           html_url: "...", user: { login: "octocat" } },
       },
-      {
-        match: "/pulls/7/merge",
-        method: "PUT",
-        body: { merged: true, sha: "merge-sha", message: "Merged" },
-      },
     ]);
 
     const tools = buildPRManagerTools(sdk);
     const tool = findTool(tools, "github_merge_pr");
-    const result = await tool.execute({ owner: "octocat", repo: "hello", pr_number: 7 });
+    const result = await tool.execute({ owner: "octocat", repo: "hello", pr_number: 7 }, fakeContext);
 
-    expect(sdk.llm.confirm).toHaveBeenCalled();
-    expect(result.content).toMatch(/merged/i);
-  });
-
-  it("cancels merge when user declines confirmation", async () => {
-    const sdk = makeSdk({ require_pr_review: true });
-    sdk.llm.confirm = vi.fn().mockResolvedValue(false); // user says no
-
-    global.fetch = mockFetchRoutes([
-      {
-        match: "/pulls/7",
-        method: "GET",
-        body: { number: 7, title: "Risky merge", state: "open",
-          head: { label: "feat", sha: "abc" }, base: { label: "main" },
-          html_url: "...", user: { login: "octocat" } },
-      },
-    ]);
-
-    const tools = buildPRManagerTools(sdk);
-    const tool = findTool(tools, "github_merge_pr");
-    const result = await tool.execute({ owner: "octocat", repo: "hello", pr_number: 7 });
-
-    expect(result.content).toMatch(/cancelled/i);
-    // No merge call should be made
+    // Should return an error instructing the LLM to ask for user confirmation
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/require_pr_review/i);
+    expect(result.error).toMatch(/confirmed=true/);
+    // No merge should have been attempted
     const mergeCalls = global.fetch.mock.calls.filter(([url, opts]) =>
       url.includes("/merge") && opts?.method === "PUT"
     );
     expect(mergeCalls).toHaveLength(0);
   });
 
-  it("skips confirmation when skip_review_check is true", async () => {
+  it("merges when require_pr_review is true and confirmed=true", async () => {
     const sdk = makeSdk({ require_pr_review: true });
     global.fetch = mockFetchRoutes([
       {
@@ -419,11 +412,11 @@ describe("github_merge_pr - require_pr_review policy", () => {
     const tool = findTool(tools, "github_merge_pr");
     const result = await tool.execute({
       owner: "octocat", repo: "hello", pr_number: 7,
-      skip_review_check: true,
-    });
+      confirmed: true,
+    }, fakeContext);
 
-    expect(sdk.llm.confirm).not.toHaveBeenCalled();
-    expect(result.content).toMatch(/merged/i);
+    expect(result.success).toBe(true);
+    expect(result.data.pr_number).toBe(7);
   });
 
   it("validates merge_method enum", async () => {
@@ -433,9 +426,9 @@ describe("github_merge_pr - require_pr_review policy", () => {
 
     const result = await tool.execute({
       owner: "octocat", repo: "hello", pr_number: 7, merge_method: "invalid",
-    });
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/invalid/);
+    }, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/invalid/i);
   });
 });
 
@@ -448,7 +441,7 @@ describe("github_create_issue", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("creates issue and returns number + URL in content", async () => {
+  it("creates issue and returns number + URL", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -472,19 +465,21 @@ describe("github_create_issue", () => {
       body: "Steps to reproduce...",
       labels: ["bug"],
       assignees: ["reviewer"],
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/#15/);
-    expect(result.content).toMatch(/github\.com/);
+    expect(result.success).toBe(true);
+    expect(result.data.number).toBe(15);
+    expect(result.data.html_url).toMatch(/github\.com/);
+    expect(result.data.labels).toContain("bug");
   });
 
-  it("requires title parameter", async () => {
+  it("returns error when title parameter is missing", async () => {
     const sdk = makeSdk();
     const tools = buildIssueTrackerTools(sdk);
     const tool = findTool(tools, "github_create_issue");
-    const result = await tool.execute({ owner: "o", repo: "r" });
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/title/);
+    const result = await tool.execute({ owner: "o", repo: "r" }, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/title/);
   });
 });
 
@@ -493,7 +488,7 @@ describe("github_close_issue", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("closes issue with comment and returns confirmation", async () => {
+  it("closes issue with comment and returns closed state", async () => {
     const sdk = makeSdk();
     global.fetch = mockFetchRoutes([
       {
@@ -518,11 +513,13 @@ describe("github_close_issue", () => {
     const result = await tool.execute({
       owner: "octocat", repo: "hello", issue_number: 20,
       comment: "Closing as not planned.", reason: "not_planned",
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/#20/);
-    expect(result.content).toMatch(/closed/i);
-    expect(result.content).toMatch(/won't fix|not_planned/i);
+    expect(result.success).toBe(true);
+    expect(result.data.number).toBe(20);
+    expect(result.data.state).toBe("closed");
+    expect(result.data.reason).toBe("not_planned");
+    expect(result.data.html_url).toMatch(/github\.com/);
   });
 });
 
@@ -548,19 +545,21 @@ describe("github_trigger_workflow", () => {
       owner: "octocat", repo: "hello",
       workflow_id: "ci.yml", ref: "main",
       inputs: { environment: "staging" },
-    });
+    }, fakeContext);
 
-    expect(result.content).toMatch(/ci\.yml/);
-    expect(result.content).toMatch(/triggered/i);
+    expect(result.success).toBe(true);
+    expect(result.data.workflow_id).toBe("ci.yml");
+    expect(result.data.ref).toBe("main");
+    expect(result.data.inputs).toEqual({ environment: "staging" });
   });
 
-  it("requires workflow_id and ref", async () => {
+  it("returns error when ref parameter is missing", async () => {
     const sdk = makeSdk();
     const tools = buildIssueTrackerTools(sdk);
     const tool = findTool(tools, "github_trigger_workflow");
-    const result = await tool.execute({ owner: "o", repo: "r", workflow_id: "ci.yml" });
-    expect(result.content).toMatch(/Error/);
-    expect(result.content).toMatch(/ref/);
+    const result = await tool.execute({ owner: "o", repo: "r", workflow_id: "ci.yml" }, fakeContext);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/ref/);
   });
 });
 
@@ -573,16 +572,17 @@ describe("GitHub API error handling", () => {
   beforeEach(() => { originalFetch = global.fetch; });
   afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
-  it("returns content with error message on API failure", async () => {
+  it("returns success:false with error message on API failure", async () => {
     const sdk = makeSdk();
     global.fetch = vi.fn().mockRejectedValue(new Error("Network error"));
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_list_repos");
-    const result = await tool.execute({ owner: "someone" });
+    const result = await tool.execute({ owner: "someone" }, fakeContext);
 
-    expect(result.content).toMatch(/Failed/i);
-    expect(result.content).toMatch(/Network error/);
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Failed/i);
+    expect(result.error).toMatch(/Network error/);
   });
 
   it("redacts token patterns from error messages", async () => {
@@ -593,10 +593,11 @@ describe("GitHub API error handling", () => {
 
     const tools = buildRepoOpsTools(sdk);
     const tool = findTool(tools, "github_list_repos");
-    const result = await tool.execute({});
+    const result = await tool.execute({}, fakeContext);
 
+    expect(result.success).toBe(false);
     // The raw token should be redacted by formatError
-    expect(result.content).not.toContain("ghp_abc123secretXYZ");
-    expect(result.content).toContain("[REDACTED]");
+    expect(result.error).not.toContain("ghp_abc123secretXYZ");
+    expect(result.error).toContain("[REDACTED]");
   });
 });

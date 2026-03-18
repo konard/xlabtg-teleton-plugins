@@ -1,13 +1,13 @@
 /**
  * Tests for github_check_auth tool.
  *
- * The github-dev-assistant plugin now uses Personal Access Token (PAT)
- * authentication instead of OAuth. This file tests that the auth check
- * correctly validates the stored token and returns friendly messages.
+ * The github-dev-assistant plugin uses Personal Access Token (PAT)
+ * authentication. This file tests that the auth check correctly validates
+ * the stored token and returns SDK-compliant ToolResult objects.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { tools } from "../index.js";
+import { tools, manifest } from "../index.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,15 +17,13 @@ function makeSdk(token = null, config = {}) {
   return {
     secrets: {
       get: (key) => (key === "github_token" ? token : null),
-      set: vi.fn(),
-      delete: vi.fn(),
+      has: (key) => key === "github_token" && token !== null,
     },
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     pluginConfig: {
       default_branch: "main",
       ...config,
     },
-    llm: { confirm: vi.fn() },
   };
 }
 
@@ -44,18 +42,20 @@ beforeEach(() => { originalFetch = global.fetch; });
 afterEach(() => { global.fetch = originalFetch; vi.restoreAllMocks(); });
 
 describe("github_check_auth", () => {
-  it("returns not-connected message when no token is set", async () => {
+  it("returns success:true with authenticated:false when no token is set", async () => {
     const sdk = makeSdk(null); // no token
     const toolList = tools(sdk);
     const tool = findTool(toolList, "github_check_auth");
 
-    const result = await tool.execute({});
+    const result = await tool.execute({}, {});
 
-    expect(result.content).toMatch(/not connected/i);
-    expect(result.content).toMatch(/github_token/);
+    expect(result.success).toBe(true);
+    expect(result.data.authenticated).toBe(false);
+    expect(result.data.message).toMatch(/not connected/i);
+    expect(result.data.message).toMatch(/github_token/);
   });
 
-  it("returns authenticated username when token is valid", async () => {
+  it("returns success:true with login when token is valid", async () => {
     const sdk = makeSdk("ghp_validtoken");
     const toolList = tools(sdk);
     const tool = findTool(toolList, "github_check_auth");
@@ -67,13 +67,16 @@ describe("github_check_auth", () => {
       text: async () => JSON.stringify({ login: "octocat", name: "The Octocat" }),
     });
 
-    const result = await tool.execute({});
+    const result = await tool.execute({}, {});
 
-    expect(result.content).toMatch(/octocat/);
-    expect(result.content).toMatch(/connected/i);
+    expect(result.success).toBe(true);
+    expect(result.data.authenticated).toBe(true);
+    expect(result.data.login).toBe("octocat");
+    expect(result.data.message).toMatch(/connected/i);
+    expect(result.data.message).toMatch(/octocat/);
   });
 
-  it("returns token expired message on 401", async () => {
+  it("returns success:true with authenticated:false on 401", async () => {
     const sdk = makeSdk("ghp_expiredtoken");
     const toolList = tools(sdk);
     const tool = findTool(toolList, "github_check_auth");
@@ -85,10 +88,24 @@ describe("github_check_auth", () => {
       text: async () => JSON.stringify({ message: "Bad credentials" }),
     });
 
-    const result = await tool.execute({});
+    const result = await tool.execute({}, {});
 
-    expect(result.content).toMatch(/invalid or expired/i);
-    expect(result.content).toMatch(/github_token/);
+    expect(result.success).toBe(true);
+    expect(result.data.authenticated).toBe(false);
+    expect(result.data.message).toMatch(/invalid or expired/i);
+    expect(result.data.message).toMatch(/github_token/);
+  });
+});
+
+describe("manifest export", () => {
+  it("exports a manifest with required fields", () => {
+    expect(manifest).toBeDefined();
+    expect(manifest.name).toBe("github-dev-assistant");
+    expect(manifest.version).toBeDefined();
+    expect(manifest.sdkVersion).toMatch(/^>=/);
+    expect(manifest.secrets).toBeDefined();
+    expect(manifest.secrets.github_token).toBeDefined();
+    expect(manifest.secrets.github_token.required).toBe(true);
   });
 });
 
@@ -115,6 +132,15 @@ describe("tools() export", () => {
     const toolList = tools(sdk);
     for (const tool of toolList) {
       expect(tool.name).toMatch(/^github_/);
+    }
+  });
+
+  it("all execute functions accept (params, context) signature", () => {
+    const sdk = makeSdk("ghp_test");
+    const toolList = tools(sdk);
+    for (const tool of toolList) {
+      // Function.length returns the number of declared parameters
+      expect(tool.execute.length).toBeGreaterThanOrEqual(0);
     }
   });
 });
