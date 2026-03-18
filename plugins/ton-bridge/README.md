@@ -20,7 +20,7 @@ Beautiful inline button plugin for TON Bridge Mini App access.
 | Tool | Description | Category |
 |------|-------------|----------|
 | `ton_bridge_open` | Open TON Bridge with beautiful button | Action |
-| `ton_bridge_button_text` | Get current button configuration | Data-bearing |
+| `ton_bridge_about` | Send info about TON Bridge with a link to the Mini App | Data-bearing |
 | `ton_bridge_custom_message` | Send custom message with button | Action |
 
 ## Installation

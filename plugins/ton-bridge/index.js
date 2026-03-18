@@ -2,8 +2,32 @@
  * TON Bridge plugin
  *
  * Provides LLM-callable tools to share the TON Bridge Mini App link.
- * Returns agent-compatible { content, reply_markup } responses.
+ * Pattern B (SDK) — uses sdk.pluginConfig, sdk.log
  */
+
+// ─── Manifest (inline) ────────────────────────────────────────────────────────
+// The runtime reads this export for sdkVersion and defaultConfig.
+// The manifest.json file is used by the registry for discovery.
+
+export const manifest = {
+  name: "ton-bridge",
+  version: "1.2.0",
+  sdkVersion: ">=1.0.0",
+  description: "Share TON Bridge Mini App link with a button. Opens https://t.me/TONBridge_robot?startapp",
+  author: {
+    name: "Tony (AI Agent)",
+    role: "AI Developer",
+    supervisor: "Anton Poroshin",
+    link: "https://github.com/xlabtg",
+  },
+  defaultConfig: {
+    buttonText: "TON Bridge No1",
+    buttonEmoji: "🌉",
+    startParam: "",
+  },
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const MINI_APP_URL = "https://t.me/TONBridge_robot?startapp";
 
@@ -16,6 +40,8 @@ function buildReplyMarkup(buttonText, buttonEmoji, startParam) {
     inline_keyboard: [[{ text: label, url }]],
   };
 }
+
+// ─── Tools ────────────────────────────────────────────────────────────────────
 
 export const tools = (sdk) => [
   // ── Tool: ton_bridge_open ─────────────────────────────────────────────────
@@ -50,12 +76,15 @@ export const tools = (sdk) => [
         );
 
         return {
-          content,
-          reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          success: true,
+          data: {
+            content,
+            reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          },
         };
       } catch (err) {
         sdk.log?.error("ton_bridge_open failed:", err.message);
-        return { content: `Error: ${String(err.message || err).slice(0, 200)}` };
+        return { success: false, error: String(err.message || err).slice(0, 500) };
       }
     },
   },
@@ -81,13 +110,16 @@ export const tools = (sdk) => [
         );
 
         return {
-          content:
-            "ℹ️ **About TON Bridge**\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.",
-          reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          success: true,
+          data: {
+            content:
+              "ℹ️ **About TON Bridge**\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.",
+            reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          },
         };
       } catch (err) {
         sdk.log?.error("ton_bridge_about failed:", err.message);
-        return { content: `Error: ${String(err.message || err).slice(0, 200)}` };
+        return { success: false, error: String(err.message || err).slice(0, 500) };
       }
     },
   },
@@ -121,12 +153,15 @@ export const tools = (sdk) => [
         );
 
         return {
-          content: params.customMessage,
-          reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          success: true,
+          data: {
+            content: params.customMessage,
+            reply_markup: buildReplyMarkup(buttonText, buttonEmoji, startParam),
+          },
         };
       } catch (err) {
         sdk.log?.error("ton_bridge_custom_message failed:", err.message);
-        return { content: `Error: ${String(err.message || err).slice(0, 200)}` };
+        return { success: false, error: String(err.message || err).slice(0, 500) };
       }
     },
   },
