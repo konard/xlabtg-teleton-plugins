@@ -1,13 +1,11 @@
 {
   "id": "ton-trading-bot",
   "name": "TON Trading Bot",
-  "version": "1.0.0",
-  "description": "Autonomous TON trading agent with 9-step trading pipeline (fetch → analyze → execute → record)",
+  "version": "2.0.0",
+  "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, and DEX swap execution. The LLM composes these into trading strategies.",
   "author": {
     "name": "Tony (AI Agent)",
-    "role": "AI Developer",
-    "supervisor": "Anton Poroshin",
-    "studio": "https://github.com/xlabtg"
+    "url": "https://github.com/xlabtg"
   },
   "license": "MIT",
   "entry": "index.js",
@@ -15,63 +13,38 @@
   "sdkVersion": ">=1.0.0",
   "tools": [
     {
-      "name": "ton_fetch_data",
-      "description": "Fetch market data: TON price, tokens, DEX liquidity, volume"
+      "name": "ton_trading_get_market_data",
+      "description": "Fetch current TON price and DEX swap quotes for a token pair"
     },
     {
-      "name": "ton_analyze_signal",
-      "description": "AI analysis → signal (buy/sell/hold) with confidence"
+      "name": "ton_trading_get_portfolio",
+      "description": "Get wallet balance, jetton holdings, and recent trade history"
     },
     {
-      "name": "ton_validate_risk",
-      "description": "Validate risk: balance, max trade %, risk level"
+      "name": "ton_trading_validate_trade",
+      "description": "Check risk parameters before a trade (balance, max trade %, minimum balance)"
     },
     {
-      "name": "ton_generate_plan",
-      "description": "Generate trade plan: entry, exit, stop-loss, position size"
+      "name": "ton_trading_simulate_trade",
+      "description": "Paper-trade a swap using the virtual simulation balance (no real funds)"
     },
     {
-      "name": "ton_simulate_trade",
-      "description": "Simulate trade with results (no real money)"
+      "name": "ton_trading_execute_swap",
+      "description": "Execute a real DEX swap (STON.fi / DeDust) from the agent wallet — DM only"
     },
     {
-      "name": "ton_execute_trade",
-      "description": "Execute real trade on TON DEX (DeDust/STON.fi)"
-    },
-    {
-      "name": "ton_record_result",
-      "description": "Record trade result (sell) and update PnL"
-    },
-    {
-      "name": "ton_update_analytics",
-      "description": "Update portfolio analytics: PnL, win rate, metrics"
-    },
-    {
-      "name": "ton_get_portfolio",
-      "description": "Get portfolio overview with holdings and recent trades"
+      "name": "ton_trading_record_trade",
+      "description": "Close an open trade in the journal and record final PnL"
     }
   ],
   "permissions": [],
-  "tags": [
-    "trading",
-    "ton",
-    "dex",
-    "ai",
-    "autonomous",
-    "portfolio"
-  ],
+  "tags": ["trading", "ton", "dex", "portfolio", "simulation"],
   "repository": "https://github.com/xlabtg/teleton-plugins",
   "funding": null,
   "defaultConfig": {
-    "enabled": true,
-    "riskLevel": "medium",
     "maxTradePercent": 10,
-    "minBalanceForTrading": 1,
-    "useDedust": true,
-    "enableSimulation": true,
-    "autoTrade": true,
-    "mode": "simulation",
-    "simulationBalance": 1000,
-    "requireManualConfirm": true
+    "minBalanceTON": 1,
+    "defaultSlippage": 0.05,
+    "simulationBalance": 1000
   }
 }

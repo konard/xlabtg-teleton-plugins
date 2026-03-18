@@ -188,9 +188,9 @@
 	{
       "id": "ton-trading-bot",
       "name": "TON Trading Bot",
-      "description": "Autonomous TON trading agent with 9-step trading pipeline (fetch → analyze → execute → record)",
+      "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, and DEX swap execution",
       "author": "xlabtg",
-      "tags": ["trading", "ton", "dex", "ai", "autonomous", "portfolio"],
+      "tags": ["trading", "ton", "dex", "portfolio", "simulation"],
       "path": "plugins/ton-trading-bot"
     },
 	  {
