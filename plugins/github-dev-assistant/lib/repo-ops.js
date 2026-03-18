@@ -11,7 +11,7 @@
  * All tools create a fresh GitHub client per execution to pick up the latest
  * token from sdk.secrets (avoids stale client issues).
  *
- * All tools return { content: string } for direct LLM consumption.
+ * All tools return { success, data?, error? } per the SDK ToolResult contract.
  */
 
 import { createGitHubClient } from "./github-client.js";
@@ -80,7 +80,7 @@ export function buildRepoOpsTools(sdk) {
           },
         },
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const client = createGitHubClient(sdk);
           const owner = await resolveOwner(client, params.owner ?? null);
@@ -103,9 +103,9 @@ export function buildRepoOpsTools(sdk) {
             "asc"
           );
 
-          if (!typeVal.valid) return { content: `Error: ${typeVal.error}` };
-          if (!sortVal.valid) return { content: `Error: ${sortVal.error}` };
-          if (!directionVal.valid) return { content: `Error: ${directionVal.error}` };
+          if (!typeVal.valid) return { success: false, error: typeVal.error };
+          if (!sortVal.valid) return { success: false, error: sortVal.error };
+          if (!directionVal.valid) return { success: false, error: directionVal.error };
 
           // Determine endpoint: /user/repos for self, /users/:owner/repos or /orgs/:owner/repos
           let path;
@@ -128,26 +128,29 @@ export function buildRepoOpsTools(sdk) {
           sdk.log.info(`github_list_repos: fetched ${repos.length} repos for ${owner}`);
 
           if (repos.length === 0) {
-            return { content: `No repositories found for ${owner}.` };
+            return { success: true, data: { owner, repos: [], message: `No repositories found for ${owner}.` } };
           }
 
-          const lines = repos.map((r) => {
-            const vis = r.private ? "private" : "public";
-            const lang = r.language ? ` [${r.language}]` : "";
-            const desc = r.description ? ` — ${r.description}` : "";
-            return `- **${r.name}** (${vis})${lang}${desc}`;
-          });
-
-          const pageInfo =
-            pagination.next
-              ? `\n\nPage ${page} of results. Use page=${pagination.next} to get more.`
-              : "";
+          const repoList = repos.map((r) => ({
+            name: r.name,
+            full_name: r.full_name,
+            description: r.description ?? null,
+            language: r.language ?? null,
+            private: r.private,
+            html_url: r.html_url,
+          }));
 
           return {
-            content: `Repositories for **${owner}** (${repos.length} shown):\n\n${lines.join("\n")}${pageInfo}`,
+            success: true,
+            data: {
+              owner,
+              repos: repoList,
+              count: repos.length,
+              next_page: pagination.next ?? null,
+            },
           };
         } catch (err) {
-          return { content: `Failed to list repositories: ${formatError(err)}` };
+          return { success: false, error: `Failed to list repositories: ${formatError(err)}` };
         }
       },
     },
@@ -192,10 +195,10 @@ export function buildRepoOpsTools(sdk) {
         },
         required: ["name"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["name"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
 
@@ -212,14 +215,17 @@ export function buildRepoOpsTools(sdk) {
 
           sdk.log.info(`github_create_repo: created ${repo.full_name}`);
 
-          const vis = repo.private ? "private" : "public";
           return {
-            content:
-              `Repository **${repo.full_name}** created successfully (${vis}).\n` +
-              `URL: ${repo.html_url}`,
+            success: true,
+            data: {
+              full_name: repo.full_name,
+              html_url: repo.html_url,
+              private: repo.private,
+              message: `Repository ${repo.full_name} created successfully.`,
+            },
           };
         } catch (err) {
-          return { content: `Failed to create repository: ${formatError(err)}` };
+          return { success: false, error: `Failed to create repository: ${formatError(err)}` };
         }
       },
     },
@@ -255,10 +261,10 @@ export function buildRepoOpsTools(sdk) {
         },
         required: ["owner", "repo", "path"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo", "path"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
           const queryParams = {};
@@ -271,14 +277,21 @@ export function buildRepoOpsTools(sdk) {
 
           // Directory listing
           if (Array.isArray(data)) {
-            const entries = data.map((e) => {
-              const icon = e.type === "dir" ? "📁" : "📄";
-              return `${icon} ${e.name}${e.type === "dir" ? "/" : ""}`;
-            });
+            const entries = data.map((e) => ({
+              name: e.name,
+              path: e.path,
+              type: e.type,
+              size: e.size ?? 0,
+              sha: e.sha,
+            }));
             return {
-              content:
-                `Directory **${params.path}** in ${params.owner}/${params.repo}:\n\n` +
-                entries.join("\n"),
+              success: true,
+              data: {
+                type: "directory",
+                path: params.path,
+                repo: `${params.owner}/${params.repo}`,
+                entries,
+              },
             };
           }
 
@@ -287,18 +300,21 @@ export function buildRepoOpsTools(sdk) {
 
           sdk.log.info(`github_get_file: read ${data.path} (${data.size} bytes)`);
 
-          if (!content) {
-            return {
-              content: `File **${data.path}** exists but has no readable text content (${data.size} bytes).`,
-            };
-          }
-
           return {
-            content:
-              `File **${data.path}** (${data.size} bytes):\n\n\`\`\`\n${content}\n\`\`\``,
+            success: true,
+            data: {
+              type: "file",
+              path: data.path,
+              repo: `${params.owner}/${params.repo}`,
+              size: data.size,
+              sha: data.sha,
+              content: content ?? null,
+              encoding: content ? "utf8" : null,
+              html_url: data.html_url,
+            },
           };
         } catch (err) {
-          return { content: `Failed to get file: ${formatError(err)}` };
+          return { success: false, error: `Failed to get file: ${formatError(err)}` };
         }
       },
     },
@@ -355,10 +371,10 @@ export function buildRepoOpsTools(sdk) {
         },
         required: ["owner", "repo", "path", "content", "message"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo", "path", "content", "message"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
 
@@ -390,15 +406,19 @@ export function buildRepoOpsTools(sdk) {
           );
 
           const action = params.sha ? "updated" : "created";
-          const commitUrl = result.commit?.html_url ?? null;
           return {
-            content:
-              `File **${params.path}** ${action} successfully in ${params.owner}/${params.repo}.\n` +
-              `Commit: "${params.message}"` +
-              (commitUrl ? `\nURL: ${commitUrl}` : ""),
+            success: true,
+            data: {
+              action,
+              path: params.path,
+              repo: `${params.owner}/${params.repo}`,
+              commit_sha: result.commit?.sha ?? null,
+              commit_url: result.commit?.html_url ?? null,
+              message: params.message,
+            },
           };
         } catch (err) {
-          return { content: `Failed to update file: ${formatError(err)}` };
+          return { success: false, error: `Failed to update file: ${formatError(err)}` };
         }
       },
     },
@@ -434,10 +454,10 @@ export function buildRepoOpsTools(sdk) {
         },
         required: ["owner", "repo", "branch"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo", "branch"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
           const owner = encodeURIComponent(params.owner);
@@ -449,7 +469,8 @@ export function buildRepoOpsTools(sdk) {
           const sha = refData.object?.sha;
           if (!sha) {
             return {
-              content: `Failed to create branch: could not resolve source branch "${fromRef}".`,
+              success: false,
+              error: `Failed to create branch: could not resolve source branch "${fromRef}".`,
             };
           }
 
@@ -465,12 +486,16 @@ export function buildRepoOpsTools(sdk) {
 
           const newSha = result.object?.sha ?? sha;
           return {
-            content:
-              `Branch **${params.branch}** created in ${params.owner}/${params.repo} from \`${fromRef}\`.\n` +
-              `SHA: ${newSha.slice(0, 7)}`,
+            success: true,
+            data: {
+              branch: params.branch,
+              repo: `${params.owner}/${params.repo}`,
+              from_ref: fromRef,
+              sha: newSha,
+            },
           };
         } catch (err) {
-          return { content: `Failed to create branch: ${formatError(err)}` };
+          return { success: false, error: `Failed to create branch: ${formatError(err)}` };
         }
       },
     },

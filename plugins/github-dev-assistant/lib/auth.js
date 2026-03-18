@@ -5,15 +5,18 @@
  *  - OAuth authorization URL generation with CSRF state parameter
  *  - State storage with TTL via sdk.storage
  *  - Token exchange (code → access token) via GitHub OAuth API
- *  - Token persistence via sdk.secrets
  *  - Token validation by calling /user endpoint
- *  - Token revocation
  *
  * Security notes:
  *  - State is generated with 32 cryptographically random bytes (64 hex chars)
- *  - State TTL is 10 minutes (600 seconds)
- *  - Tokens are stored ONLY in sdk.secrets — never logged or put in config
+ *  - State TTL is 10 minutes (600 seconds), enforced via StorageSDK TTL option
+ *  - Tokens are returned to the caller for storage — sdk.secrets is read-only
  *  - Client secret is read from sdk.secrets — never hardcoded
+ *
+ * Note on sdk.secrets:
+ *  SecretsSDK is read-only (get/require/has only). Tokens exchanged here must be
+ *  stored by the runtime via the admin /plugin set command, or passed via env var.
+ *  This module never attempts to write to sdk.secrets directly.
  */
 
 import { generateState, formatError } from "./utils.js";
@@ -21,11 +24,8 @@ import { generateState, formatError } from "./utils.js";
 const GITHUB_OAUTH_BASE = "https://github.com";
 const GITHUB_API_BASE = "https://api.github.com";
 
-// State TTL in seconds (10 minutes)
-const STATE_TTL_SECONDS = 600;
-
-// Secret key under which we store the access token in sdk.secrets
-export const ACCESS_TOKEN_SECRET_KEY = "github_access_token";
+// State TTL in milliseconds (10 minutes)
+const STATE_TTL_MS = 600_000;
 
 // Storage key for pending OAuth state entries
 const STATE_STORAGE_PREFIX = "github_oauth_state_";
@@ -59,19 +59,19 @@ export function createAuthManager(sdk) {
 
   /**
    * Persist a state token with TTL in sdk.storage.
+   * StorageSDK.set() handles JSON serialization automatically.
    * @param {string} state
    */
   function saveState(state) {
-    const entry = {
-      state,
-      created_at: Date.now(),
-      expires_at: Date.now() + STATE_TTL_SECONDS * 1000,
-    };
-    sdk.storage.set(`${STATE_STORAGE_PREFIX}${state}`, JSON.stringify(entry));
+    sdk.storage.set(
+      `${STATE_STORAGE_PREFIX}${state}`,
+      { state, created_at: Date.now() },
+      { ttl: STATE_TTL_MS }
+    );
   }
 
   /**
-   * Validate a state token: must exist in storage and not be expired.
+   * Validate a state token: must exist in storage (not expired via StorageSDK TTL).
    * Deletes the state entry regardless to prevent replay.
    * @param {string} state
    * @returns {boolean}
@@ -79,23 +79,13 @@ export function createAuthManager(sdk) {
   function validateAndConsumeState(state) {
     if (!state) return false;
     const key = `${STATE_STORAGE_PREFIX}${state}`;
-    const raw = sdk.storage.get(key);
-    if (!raw) return false;
+    // StorageSDK.get() returns undefined when the key is missing or TTL has expired
+    const entry = sdk.storage.get(key);
+    if (!entry) return false;
 
     // Always consume (delete) the state to prevent replay attacks
     sdk.storage.delete(key);
 
-    let entry;
-    try {
-      entry = JSON.parse(raw);
-    } catch {
-      return false;
-    }
-
-    // Check expiry
-    if (Date.now() > entry.expires_at) {
-      return false;
-    }
     return entry.state === state;
   }
 
@@ -142,9 +132,13 @@ export function createAuthManager(sdk) {
      * Exchange an OAuth authorization code for an access token.
      * Validates the CSRF state before proceeding.
      *
+     * Note: The returned access_token cannot be written to sdk.secrets directly
+     * (SecretsSDK is read-only). The caller should instruct the user to store
+     * it via the /plugin set command or the GITHUB_DEV_ASSISTANT_GITHUB_TOKEN env var.
+     *
      * @param {string} code - Authorization code from GitHub callback
      * @param {string} state - State parameter from callback (must match saved state)
-     * @returns {{ success: boolean, user_login?: string, scopes?: string[], error?: string }}
+     * @returns {{ user_login: string, scopes: string[], access_token: string }}
      */
     async exchangeCode(code, state) {
       if (!validateAndConsumeState(state)) {
@@ -201,9 +195,7 @@ export function createAuthManager(sdk) {
         throw new Error("No access token received from GitHub.");
       }
 
-      // Store the token — never logged, only in sdk.secrets
-      sdk.secrets.set(ACCESS_TOKEN_SECRET_KEY, accessToken);
-      sdk.log.info("GitHub OAuth: access token stored successfully");
+      sdk.log.info("GitHub OAuth: access token received (not logged)");
 
       // Verify token by fetching the authenticated user
       const userRes = await fetch(`${GITHUB_API_BASE}/user`, {
@@ -225,9 +217,12 @@ export function createAuthManager(sdk) {
 
       sdk.log.info(`GitHub OAuth: authenticated as ${user.login}`);
 
+      // Return the token so the caller can instruct the user to configure it.
+      // SecretsSDK is read-only — we cannot store it programmatically.
       return {
         user_login: user.login,
         scopes: grantedScopes,
+        access_token: accessToken,
       };
     },
 
@@ -236,7 +231,7 @@ export function createAuthManager(sdk) {
      * Calls /user endpoint to verify the stored token is still valid.
      *
      * @param {object} client - GitHub API client (from github-client.js)
-     * @returns {{ authenticated: boolean, user_login?: string, scopes?: string[] }}
+     * @returns {{ authenticated: boolean, user_login?: string, ... }}
      */
     async checkAuth(client) {
       if (!client.isAuthenticated()) {
@@ -245,8 +240,6 @@ export function createAuthManager(sdk) {
 
       try {
         const user = await client.get("/user");
-        // Fetch token scopes — they're in the X-OAuth-Scopes header of /user
-        // We can't easily get headers here, so just return what we know
         return {
           authenticated: true,
           user_login: user.login,
@@ -257,9 +250,11 @@ export function createAuthManager(sdk) {
         };
       } catch (err) {
         if (err.status === 401) {
-          // Token is invalid — clean it up
-          sdk.secrets.delete(ACCESS_TOKEN_SECRET_KEY);
-          sdk.log.info("GitHub OAuth: stale token removed");
+          // Token is invalid — log it so the admin can take action
+          sdk.log.warn(
+            "GitHub OAuth: stored token is invalid or expired. " +
+            "Update github_token via /plugin set or GITHUB_DEV_ASSISTANT_GITHUB_TOKEN env var."
+          );
           return { authenticated: false };
         }
         throw err;
@@ -267,13 +262,14 @@ export function createAuthManager(sdk) {
     },
 
     /**
-     * Revoke the stored access token and remove it from sdk.secrets.
-     * Calls GitHub's OAuth revoke endpoint if client credentials are available.
+     * Revoke the stored access token at GitHub's side.
+     * Local removal requires the user to unset the secret via /plugin set or env var.
      *
      * @returns {{ revoked: boolean, message: string }}
      */
     async revokeToken() {
-      const token = sdk.secrets.get(ACCESS_TOKEN_SECRET_KEY);
+      // Read the token from secrets (read-only access)
+      const token = sdk.secrets.get("github_token");
       if (!token) {
         return { revoked: false, message: "No token to revoke." };
       }
@@ -281,7 +277,7 @@ export function createAuthManager(sdk) {
       const clientId = getClientId();
       const clientSecret = getClientSecret();
 
-      // Attempt to revoke at GitHub's side (best-effort; local removal is authoritative)
+      // Attempt to revoke at GitHub's side (best-effort)
       if (clientId && clientSecret) {
         try {
           await fetch(
@@ -300,16 +296,21 @@ export function createAuthManager(sdk) {
           );
           sdk.log.info("GitHub OAuth: token revoked at GitHub");
         } catch (err) {
-          // Non-fatal — we still remove locally
+          // Non-fatal — log and continue
           sdk.log.warn(`GitHub OAuth: remote revocation failed: ${formatError(err)}`);
         }
       }
 
-      // Always remove locally
-      sdk.secrets.delete(ACCESS_TOKEN_SECRET_KEY);
-      sdk.log.info("GitHub OAuth: access token removed from secrets");
+      // We cannot delete from sdk.secrets (read-only). Instruct the user.
+      sdk.log.info("GitHub OAuth: remote token revocation attempted");
 
-      return { revoked: true, message: "GitHub access token revoked and removed." };
+      return {
+        revoked: true,
+        message:
+          "GitHub token revoked at GitHub's side. " +
+          "To complete removal, unset the github_token secret: " +
+          "remove the GITHUB_DEV_ASSISTANT_GITHUB_TOKEN env var or use /plugin set github-dev-assistant github_token ''.",
+      };
     },
   };
 }

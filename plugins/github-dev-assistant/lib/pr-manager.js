@@ -9,7 +9,7 @@
  * All tools create a fresh GitHub client per execution to pick up the latest
  * token from sdk.secrets (avoids stale client issues).
  *
- * All tools return { content: string } for direct LLM consumption.
+ * All tools return { success, data?, error? } per the SDK ToolResult contract.
  */
 
 import { createGitHubClient } from "./github-client.js";
@@ -71,10 +71,10 @@ export function buildPRManagerTools(sdk) {
         },
         required: ["owner", "repo", "title", "head"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo", "title", "head"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
 
@@ -101,15 +101,19 @@ export function buildPRManagerTools(sdk) {
             `github_create_pr: created PR #${pr.number} in ${params.owner}/${params.repo}`
           );
 
-          const draftLabel = pr.draft ? " (draft)" : "";
           return {
-            content:
-              `Pull request #${pr.number} created${draftLabel}: **${pr.title}**\n` +
-              `From \`${params.head}\` → \`${base}\`\n` +
-              `URL: ${pr.html_url}`,
+            success: true,
+            data: {
+              number: pr.number,
+              title: pr.title,
+              html_url: pr.html_url,
+              draft: pr.draft ?? false,
+              head: params.head,
+              base,
+            },
           };
         } catch (err) {
-          return { content: `Failed to create pull request: ${formatError(err)}` };
+          return { success: false, error: `Failed to create pull request: ${formatError(err)}` };
         }
       },
     },
@@ -172,10 +176,10 @@ export function buildPRManagerTools(sdk) {
         },
         required: ["owner", "repo"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
 
@@ -187,9 +191,9 @@ export function buildPRManagerTools(sdk) {
           );
           const directionVal = validateEnum(params.direction, ["asc", "desc"], "desc");
 
-          if (!stateVal.valid) return { content: `Error: ${stateVal.error}` };
-          if (!sortVal.valid) return { content: `Error: ${sortVal.error}` };
-          if (!directionVal.valid) return { content: `Error: ${directionVal.error}` };
+          if (!stateVal.valid) return { success: false, error: stateVal.error };
+          if (!sortVal.valid) return { success: false, error: sortVal.error };
+          if (!directionVal.valid) return { success: false, error: directionVal.error };
 
           const perPage = clampInt(params.per_page, 1, 100, 30);
           const page = clampInt(params.page, 1, 9999, 1);
@@ -213,29 +217,28 @@ export function buildPRManagerTools(sdk) {
 
           sdk.log.info(`github_list_prs: fetched ${prs.length} PRs from ${params.owner}/${params.repo}`);
 
-          if (prs.length === 0) {
-            return { content: `No ${stateVal.value} pull requests found in ${params.owner}/${params.repo}.` };
-          }
-
-          const lines = prs.map((pr) => {
-            const draft = pr.draft ? " [draft]" : "";
-            const labels = pr.labels?.length ? ` [${pr.labels.map((l) => l.name).join(", ")}]` : "";
-            return `- #${pr.number} **${pr.title}**${draft}${labels} by @${pr.user?.login ?? "unknown"}\n  ${pr.html_url}`;
-          });
-
-          const pageInfo =
-            pagination.next
-              ? `\n\nPage ${page} of results. Use page=${pagination.next} to get more.`
-              : "";
+          const prList = prs.map((pr) => ({
+            number: pr.number,
+            title: pr.title,
+            state: pr.state,
+            draft: pr.draft ?? false,
+            author: pr.user?.login ?? null,
+            labels: pr.labels?.map((l) => l.name) ?? [],
+            html_url: pr.html_url,
+          }));
 
           return {
-            content:
-              `${stateVal.value.charAt(0).toUpperCase() + stateVal.value.slice(1)} pull requests in **${params.owner}/${params.repo}** (${prs.length} shown):\n\n` +
-              lines.join("\n") +
-              pageInfo,
+            success: true,
+            data: {
+              repo: `${params.owner}/${params.repo}`,
+              state: stateVal.value,
+              prs: prList,
+              count: prs.length,
+              next_page: pagination.next ?? null,
+            },
           };
         } catch (err) {
-          return { content: `Failed to list pull requests: ${formatError(err)}` };
+          return { success: false, error: `Failed to list pull requests: ${formatError(err)}` };
         }
       },
     },
@@ -247,7 +250,8 @@ export function buildPRManagerTools(sdk) {
       name: "github_merge_pr",
       description:
         "Use this when the user wants to merge a pull request on GitHub. " +
-        "Returns confirmation of the merge with the commit SHA.",
+        "Returns confirmation of the merge with the commit SHA. " +
+        "When require_pr_review config is true, explicitly ask the user to confirm before calling this tool.",
       category: "action",
       parameters: {
         type: "object",
@@ -277,25 +281,25 @@ export function buildPRManagerTools(sdk) {
             type: "string",
             description: "Custom commit message body for merge/squash commits",
           },
-          skip_review_check: {
+          confirmed: {
             type: "boolean",
             description:
-              "Skip the require_pr_review confirmation check (default: false). " +
-              "Only use when the user has explicitly pre-approved the merge.",
+              "Set to true when the user has explicitly confirmed they want to merge. " +
+              "Required when require_pr_review config option is enabled.",
           },
         },
         required: ["owner", "repo", "pr_number"],
       },
-      execute: async (params) => {
+      execute: async (params, _context) => {
         try {
           const check = validateRequired(params, ["owner", "repo", "pr_number"]);
-          if (!check.valid) return { content: `Error: ${check.error}` };
+          if (!check.valid) return { success: false, error: check.error };
 
           const client = createGitHubClient(sdk);
 
           const prNum = Math.floor(Number(params.pr_number));
           if (!Number.isFinite(prNum) || prNum < 1) {
-            return { content: "Error: pr_number must be a positive integer" };
+            return { success: false, error: "pr_number must be a positive integer" };
           }
 
           const mergeMethodVal = validateEnum(
@@ -303,14 +307,18 @@ export function buildPRManagerTools(sdk) {
             ["merge", "squash", "rebase"],
             "merge"
           );
-          if (!mergeMethodVal.valid) return { content: `Error: ${mergeMethodVal.error}` };
+          if (!mergeMethodVal.valid) return { success: false, error: mergeMethodVal.error };
 
           // Security policy: check require_pr_review
+          // Since sdk.llm.confirm() does not exist in the SDK, the confirmation
+          // is handled by the LLM itself — it should ask the user before calling
+          // this tool when require_pr_review is enabled. The `confirmed` param
+          // signals that the user has explicitly approved the merge.
           const requireReview = sdk.pluginConfig?.require_pr_review ?? false;
-          const skipCheck = params.skip_review_check ?? false;
+          const confirmed = params.confirmed ?? false;
 
-          if (requireReview && !skipCheck) {
-            // Fetch PR details for the confirmation prompt
+          if (requireReview && !confirmed) {
+            // Fetch PR details so the LLM can surface them in the confirmation prompt
             let prTitle = `PR #${prNum}`;
             try {
               const prData = await client.get(
@@ -321,17 +329,14 @@ export function buildPRManagerTools(sdk) {
               // Non-fatal — use generic title
             }
 
-            // Request explicit user confirmation via sdk
-            const confirmed = await sdk.llm?.confirm?.(
-              `⚠️ You are about to merge **${prTitle}** in \`${params.owner}/${params.repo}\` ` +
-              `using the **${mergeMethodVal.value}** strategy.\n\nProceed with merge?`
-            );
-
-            if (!confirmed) {
-              return {
-                content: "Merge cancelled. The require_pr_review policy requires explicit confirmation before merging.",
-              };
-            }
+            return {
+              success: false,
+              error:
+                `The require_pr_review policy is enabled. Please ask the user to explicitly confirm ` +
+                `they want to merge ${prTitle} in ${params.owner}/${params.repo} ` +
+                `using the ${mergeMethodVal.value} strategy, ` +
+                `then call this tool again with confirmed=true.`,
+            };
           }
 
           const body = {
@@ -349,14 +354,18 @@ export function buildPRManagerTools(sdk) {
             `github_merge_pr: merged PR #${prNum} in ${params.owner}/${params.repo} via ${mergeMethodVal.value}`
           );
 
-          const sha = result.sha ? ` (${result.sha.slice(0, 7)})` : "";
           return {
-            content:
-              `Pull request #${prNum} merged successfully via ${mergeMethodVal.value}${sha}.\n` +
-              (result.message ? result.message : ""),
+            success: true,
+            data: {
+              pr_number: prNum,
+              repo: `${params.owner}/${params.repo}`,
+              merge_method: mergeMethodVal.value,
+              sha: result.sha ?? null,
+              message: result.message ?? "Merged successfully.",
+            },
           };
         } catch (err) {
-          return { content: `Failed to merge pull request: ${formatError(err)}` };
+          return { success: false, error: `Failed to merge pull request: ${formatError(err)}` };
         }
       },
     },
