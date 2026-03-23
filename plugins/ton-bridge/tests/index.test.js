@@ -291,6 +291,39 @@ describe("ton-bridge plugin", () => {
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_custom_message");
       assert.ok(tool.parameters?.required?.includes("customMessage"), "customMessage should be required");
     });
+
+    it("falls back to sdk.pluginConfig.customMessage when customMessage param is missing", async () => {
+      let capturedText;
+      const sdk = makeSdk({
+        pluginConfig: { buttonText: "TON Bridge No1", startParam: "", customMessage: "Config fallback message" },
+        telegram: {
+          sendMessage: async (chatId, text) => {
+            capturedText = text;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_custom_message");
+      await tool.execute({}, makeContext());
+      assert.equal(capturedText, "Config fallback message");
+    });
+
+    it("falls back to default message when both customMessage param and pluginConfig.customMessage are missing", async () => {
+      let capturedText;
+      const sdk = makeSdk({
+        telegram: {
+          sendMessage: async (chatId, text) => {
+            capturedText = text;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_custom_message");
+      const result = await tool.execute({}, makeContext());
+      assert.equal(result.success, true, "should succeed even without customMessage param");
+      assert.ok(capturedText, "should send a non-empty fallback message");
+      assert.ok(capturedText.toLowerCase().includes("bridge"), "fallback message should mention bridge");
+    });
   });
 
   describe("startParam URL building", () => {

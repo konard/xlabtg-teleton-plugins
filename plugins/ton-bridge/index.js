@@ -176,13 +176,18 @@ export const tools = (sdk) => [
         const startParam = sdk.pluginConfig?.startParam ?? "";
         const url = buildUrl(startParam);
 
+        const customMessage =
+          params.customMessage ??
+          sdk.pluginConfig?.customMessage ??
+          "TON Bridge — The #1 Bridge in the TON Catalog\n\nClick the button below to open TON Bridge Mini App.";
+
         sdk.log?.info(
           `ton_bridge_custom_message called by ${context?.senderId ?? "unknown"}`
         );
 
         const messageId = await sdk.telegram.sendMessage(
           context.chatId,
-          params.customMessage,
+          customMessage,
           {
             inlineKeyboard: [[{ text: buttonText, url }]],
           }
