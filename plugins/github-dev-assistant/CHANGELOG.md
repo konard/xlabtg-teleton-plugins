@@ -5,6 +5,46 @@ All notable changes to `github-dev-assistant` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-03-24
+
+### Added
+- **Extended repository operations (8 new tools)** based on github-mcp-server feature parity
+  - `github_fork_repo` — fork a repository into the authenticated user's account or an organization
+  - `github_search_repos` — search GitHub repositories with advanced search qualifiers
+  - `github_list_branches` — list all branches with their SHA and protection status
+  - `github_push_files` — commit multiple files in a single Git operation using the Trees API
+  - `github_get_repo_tree` — get the complete file tree of a repository (recursively)
+  - `github_list_tags` — list tags with their commit SHAs
+  - `github_list_releases` — list all releases with tag, name, and publish date
+  - `github_get_latest_release` — get the latest stable release with assets
+- **Extended PR and issue search operations (4 new tools)**
+  - `github_search_issues` — search issues and PRs across GitHub using search syntax
+  - `github_update_pr` — update a PR's title, body, state, or base branch
+  - `github_add_pr_review` — submit a review (APPROVE, REQUEST_CHANGES, or COMMENT)
+  - `github_get_job_logs` — get logs and step details for a specific workflow job
+- **User and social operations (8 new tools)**
+  - `github_get_me` — get the authenticated user's full profile
+  - `github_search_users` — search GitHub users and organizations
+  - `github_list_notifications` — list GitHub notifications (unread or all)
+  - `github_star_repo` — star a repository
+  - `github_unstar_repo` — unstar a repository
+  - `github_list_gists` — list gists for a user or the authenticated user
+  - `github_get_gist` — read gist content with all files
+  - `github_create_gist` — create a new gist (public or secret)
+- **Security operations (2 new tools)**
+  - `github_list_code_scanning_alerts` — list code scanning (SAST) alerts by state and severity
+  - `github_list_dependabot_alerts` — list Dependabot vulnerability alerts with CVE and package info
+- **Discussion operations (2 new tools)**
+  - `github_list_discussions` — list repository discussions with category filtering (GraphQL)
+  - `github_get_discussion` — get a discussion with its body, comments, and answer status (GraphQL)
+- **GitHub client improvements**
+  - Added `graphql()` method for GitHub GraphQL API v4 (used by discussions)
+
+### Changed
+- Plugin version bumped from `2.0.0` to `3.0.0`
+- Plugin description updated to reflect complete feature set
+- Total tool count increased from 34 to 57
+
 ## [2.0.0] - 2026-03-24
 
 ### Added

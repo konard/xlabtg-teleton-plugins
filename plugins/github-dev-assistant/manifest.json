@@ -1,8 +1,8 @@
 {
   "id": "github-dev-assistant",
   "name": "GitHub Dev Assistant",
-  "version": "2.0.0",
-  "description": "Full GitHub development workflow automation — repos, files, branches, PRs, issues, commits, Actions workflows, labels, and repository info via Personal Access Token",
+  "version": "3.0.0",
+  "description": "Complete GitHub development workflow automation — repos, files, branches, PRs, issues, commits, Actions workflows, labels, repo info, user profile, gists, notifications, starring, security alerts, and discussions via Personal Access Token",
   "author": {
     "name": "xlabtg",
     "url": "https://github.com/xlabtg"
@@ -59,10 +59,34 @@
     { "name": "github_delete_label", "description": "Delete a label from a repository" },
     { "name": "github_list_languages", "description": "List programming languages used in a repository" },
     { "name": "github_list_collaborators", "description": "List collaborators on a repository" },
-    { "name": "github_list_teams", "description": "List teams in a GitHub organization" }
+    { "name": "github_list_teams", "description": "List teams in a GitHub organization" },
+    { "name": "github_fork_repo", "description": "Fork a GitHub repository into the authenticated user's account or an organization" },
+    { "name": "github_search_repos", "description": "Search GitHub repositories using search qualifiers" },
+    { "name": "github_list_branches", "description": "List branches in a GitHub repository" },
+    { "name": "github_push_files", "description": "Commit multiple files to a GitHub repository in a single operation" },
+    { "name": "github_get_repo_tree", "description": "Get the full file tree of a GitHub repository" },
+    { "name": "github_list_tags", "description": "List tags in a GitHub repository" },
+    { "name": "github_list_releases", "description": "List releases for a GitHub repository" },
+    { "name": "github_get_latest_release", "description": "Get the latest stable release of a GitHub repository" },
+    { "name": "github_search_issues", "description": "Search for issues and pull requests across GitHub using search qualifiers" },
+    { "name": "github_update_pr", "description": "Update a pull request title, body, state, or base branch" },
+    { "name": "github_add_pr_review", "description": "Submit a review on a pull request (approve, request changes, or comment)" },
+    { "name": "github_get_job_logs", "description": "Get logs and details for a specific GitHub Actions workflow job" },
+    { "name": "github_get_me", "description": "Get the authenticated GitHub user's profile information" },
+    { "name": "github_search_users", "description": "Search for GitHub users and organizations" },
+    { "name": "github_list_notifications", "description": "List GitHub notifications for the authenticated user" },
+    { "name": "github_star_repo", "description": "Star a GitHub repository" },
+    { "name": "github_unstar_repo", "description": "Unstar a GitHub repository" },
+    { "name": "github_list_gists", "description": "List gists for a GitHub user" },
+    { "name": "github_get_gist", "description": "Get the content of a specific GitHub gist" },
+    { "name": "github_create_gist", "description": "Create a new GitHub gist with one or more files" },
+    { "name": "github_list_code_scanning_alerts", "description": "List code scanning (SAST) security alerts for a repository" },
+    { "name": "github_list_dependabot_alerts", "description": "List Dependabot vulnerability alerts for a repository" },
+    { "name": "github_list_discussions", "description": "List discussions in a GitHub repository" },
+    { "name": "github_get_discussion", "description": "Get a specific GitHub discussion with its body and comments" }
   ],
   "permissions": [],
-  "tags": ["github", "development", "automation", "git", "ci-cd"],
+  "tags": ["github", "development", "automation", "git", "ci-cd", "security", "gists", "discussions"],
   "repository": "https://github.com/xlabtg/teleton-plugins",
   "funding": null
 }
