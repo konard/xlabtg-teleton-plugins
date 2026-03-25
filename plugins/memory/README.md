@@ -92,14 +92,23 @@ Update the content and/or tags of an existing entry. Tags and entities are re-in
 | `content` | string   | No       | New content (replaces existing). May include `#tags` and `@mentions`. |
 | `tags`    | string[] | No       | Tags to attach (replaces existing). |
 
-**Example:**
+**Examples:**
 ```
+# Update content (tags and entities are re-extracted automatically)
 memory_update({ id: 42, content: "Updated meeting notes with @anton #work #done" })
+
+# Update tags only (keep existing content)
+memory_update({ id: 42, tags: ["reviewed", "archived"] })
+
+# Update both content and add extra tags
+memory_update({ id: 42, content: "TON AI Agent sprint review #work", tags: ["sprint", "q1"] })
 ```
 
-**Error example:**
+**Error examples:**
 ```json
 { "success": false, "error": "Memory entry #99 not found", "hint": "Use memory_list or memory_search to find valid entry IDs." }
+{ "success": false, "error": "id must be a positive integer", "hint": "Use memory_list or memory_search to find valid entry IDs." }
+{ "success": false, "error": "content must not be empty", "hint": "Provide a non-empty string, or omit content to update only tags." }
 ```
 
 ---
@@ -224,8 +233,62 @@ This plugin uses an isolated SQLite database (`sdk.db`) with the following schem
 
 ---
 
+## Error Handling
+
+All tools return a consistent response envelope:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | `true` on success, `false` on error |
+| `data` | object | Present when `success` is `true` |
+| `error` | string | Human-readable error message (when `success` is `false`) |
+| `hint` | string | Actionable suggestion to resolve the error (when `success` is `false`) |
+
+### Common errors and how to resolve them
+
+| Error | Cause | Resolution |
+|-------|-------|------------|
+| `content must not be empty` | Empty or whitespace-only content passed | Provide a non-empty string |
+| `id must be a positive integer` | Invalid ID (0, negative, or non-integer) | Use `memory_list` to find valid IDs |
+| `Memory entry #N not found` | ID does not exist in the database | Use `memory_list` or `memory_search` to find existing IDs |
+| `Invalid start_date: "…"` | Date string is not ISO 8601 (`YYYY-MM-DD`) | Use format `"2026-03-01"` |
+| `Invalid end_date: "…"` | Date string is not ISO 8601 (`YYYY-MM-DD`) | Use format `"2026-03-31"` |
+| `entries must be a non-empty array` | Empty or missing array passed to `memory_import` | Use `memory_export` first, then pass its `entries` array |
+
+### Example error responses
+
+```json
+// Empty content
+{ "success": false, "error": "content must not be empty", "hint": "Provide a non-empty string in the content parameter." }
+
+// Entry not found
+{ "success": false, "error": "Memory entry #99 not found", "hint": "Use memory_list or memory_search to find valid entry IDs." }
+
+// Invalid date format
+{ "success": false, "error": "Invalid start_date: \"bad-date\"", "hint": "Use ISO 8601 format: YYYY-MM-DD (e.g. \"2026-03-01\")." }
+
+// No results (not an error — success: true with empty results and a hint)
+{ "success": true, "data": { "results": [], "count": 0, "hint": "Try memory_list_tags to see available tags and entities, or broaden your search." } }
+
+// Import with empty array
+{ "success": false, "error": "entries must be a non-empty array", "hint": "Use memory_export to get a valid export blob, then pass its entries array here." }
+```
+
+---
+
 ## Migration
 
 Schema migrations are applied automatically via the `migrate()` function on plugin load. A `memory_schema_version` table tracks applied versions. New columns are added safely with `ALTER TABLE … ADD COLUMN` (no-op if already present).
 
 For data migration between instances, use `memory_export` + `memory_import`.
+
+### Export/import edge cases
+
+| Scenario | Behavior |
+|----------|----------|
+| Exporting an empty database | Returns `{ count: 0, entries: [] }` — no error |
+| Importing with `skip_duplicates: true` (default) | Entries whose content already exists are skipped; `skipped` count is returned |
+| Importing with `skip_duplicates: false` | Duplicate content is inserted again |
+| Importing entries with invalid `created_at` | Falls back to current timestamp; no error thrown |
+| Importing entries with empty content | Silently skipped; counted in `skipped` |
+| Partial failure during import | Per-entry errors are collected in `data.errors`; other entries are still imported |
