@@ -24,11 +24,12 @@ Restart Teleton — the plugin is auto-loaded from `~/.teleton/plugins/`. No cha
 
 ## Usage examples
 
-- "Open TON Bridge"
-- "Tell me about TON Bridge"
-- "Send a message about TON Bridge with a button"
-- "Open TON Bridge, no emoji on the button"
-- "Share a TON Bridge link with the text: Transfer your assets seamlessly"
+- "Open TON Bridge" → sends message with `[TON Bridge No1]` button
+- "Open TON Bridge, emoji on the button" → sends message with `[🚀 TON Bridge]` button
+- "Open TON Bridge, no emoji on the button" → sends message with `[TON Bridge]` button
+- "Tell me about TON Bridge" → info message with inline button
+- "Send a message about TON Bridge with a button" → custom message with inline button
+- "Share a TON Bridge link with the text: Transfer your assets seamlessly" → custom text + inline button
 
 ## Configuration
 
