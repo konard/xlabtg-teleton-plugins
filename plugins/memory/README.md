@@ -18,6 +18,29 @@ Save a text entry. Tags can be embedded inline (`#work`, `#urgent`) or passed ex
 memory_store("Meeting with @anton about TON AI Agent #work #important")
 ```
 
+**Error example:**
+```json
+{ "success": false, "error": "content must not be empty", "hint": "Provide a non-empty string in the content parameter." }
+```
+
+---
+
+### `memory_list`
+List all memory entries, newest first, with optional pagination. No filters needed.
+
+**Parameters:**
+| Parameter | Type    | Required | Description |
+|-----------|---------|----------|-------------|
+| `limit`   | integer | No       | Max entries to return (default 20, max 100). |
+| `offset`  | integer | No       | Entries to skip for pagination (default 0). |
+
+**Example:**
+```
+memory_list({ limit: 10, offset: 0 })
+```
+
+**Response includes:** `results`, `count`, `total`, `offset`, `has_more`
+
 ---
 
 ### `memory_search`
@@ -51,22 +74,98 @@ memory_search({ query: "TON AI Agent" })
 memory_search({ query: "meeting", tags: ["work"], entity: "anton", start_date: "2026-03-01" })
 ```
 
+**Error examples:**
+```json
+{ "success": false, "error": "Invalid start_date: \"bad-date\"", "hint": "Use ISO 8601 format: YYYY-MM-DD (e.g. \"2026-03-01\")." }
+{ "success": true, "data": { "results": [], "count": 0, "hint": "Try memory_list_tags to see available tags and entities, or broaden your search." } }
+```
+
+---
+
+### `memory_update`
+Update the content and/or tags of an existing entry. Tags and entities are re-indexed from the new content.
+
+**Parameters:**
+| Parameter | Type     | Required | Description |
+|-----------|----------|----------|-------------|
+| `id`      | integer  | Yes      | ID of the entry to update. |
+| `content` | string   | No       | New content (replaces existing). May include `#tags` and `@mentions`. |
+| `tags`    | string[] | No       | Tags to attach (replaces existing). |
+
+**Example:**
+```
+memory_update({ id: 42, content: "Updated meeting notes with @anton #work #done" })
+```
+
+**Error example:**
+```json
+{ "success": false, "error": "Memory entry #99 not found", "hint": "Use memory_list or memory_search to find valid entry IDs." }
+```
+
 ---
 
 ### `memory_delete`
-Delete a single entry by its ID (obtained from `memory_search` or `memory_store`).
+Delete a single entry by its ID (obtained from `memory_search`, `memory_list`, or `memory_store`).
 
 **Parameters:**
 | Parameter | Type    | Required | Description |
 |-----------|---------|----------|-------------|
 | `id`      | integer | Yes      | ID of the entry to delete. |
 
+**Error example:**
+```json
+{ "success": false, "error": "Memory entry #99 not found", "hint": "Use memory_list or memory_search to find valid entry IDs." }
+```
+
 ---
 
 ### `memory_list_tags`
-List all tags currently in use, along with extracted entity names, sorted by frequency.
+List all tags and entities currently in use across all memory entries, sorted by frequency.
 
 No parameters required.
+
+**Response includes:** `tags` (with counts), `entities` (with type and counts), `tag_count`, `entity_count`
+
+---
+
+### `memory_export`
+Export all memory entries to a JSON blob for backup or migration.
+
+No parameters required.
+
+**Example response:**
+```json
+{
+  "success": true,
+  "data": {
+    "version": 1,
+    "exported_at": "2026-03-25T12:00:00.000Z",
+    "count": 42,
+    "entries": [ ... ]
+  }
+}
+```
+
+---
+
+### `memory_import`
+Import memory entries from a JSON blob previously created by `memory_export`.
+
+**Parameters:**
+| Parameter         | Type    | Required | Description |
+|-------------------|---------|----------|-------------|
+| `entries`         | array   | Yes      | Array of entry objects from `memory_export`. |
+| `skip_duplicates` | boolean | No       | Skip entries with identical content (default `true`). |
+
+**Example:**
+```
+memory_import({ entries: exportedData.entries })
+```
+
+**Error example:**
+```json
+{ "success": false, "error": "entries must be a non-empty array", "hint": "Use memory_export to get a valid export blob, then pass its entries array here." }
+```
 
 ---
 
@@ -83,12 +182,50 @@ Entities are automatically detected from entry content:
 
 ---
 
-## Storage
+## Schema Reference
 
-This plugin uses an isolated SQLite database (`sdk.db`) with three tables:
+This plugin uses an isolated SQLite database (`sdk.db`) with the following schema:
 
-- `memory_entries` — the main entries (content, timestamp, user)
-- `memory_tags` — tag → entry mapping
-- `memory_entities` — entity → entry mapping (type + name)
+### `memory_entries`
+| Column       | Type    | Description |
+|--------------|---------|-------------|
+| `id`         | INTEGER | Primary key, auto-incremented |
+| `content`    | TEXT    | The stored memory text |
+| `created_at` | INTEGER | Unix timestamp of creation |
+| `updated_at` | INTEGER | Unix timestamp of last update (nullable) |
+| `user_id`    | TEXT    | Sender ID from context (nullable) |
 
-All data is scoped to the plugin and persists across sessions.
+### `memory_tags`
+| Column     | Type    | Description |
+|------------|---------|-------------|
+| `entry_id` | INTEGER | Foreign key → `memory_entries.id` (cascade delete) |
+| `tag`      | TEXT    | Lowercase tag name (without `#`) |
+
+### `memory_entities`
+| Column        | Type    | Description |
+|---------------|---------|-------------|
+| `entry_id`    | INTEGER | Foreign key → `memory_entries.id` (cascade delete) |
+| `entity_type` | TEXT    | One of: `person`, `tag`, `domain`, `name` |
+| `entity_name` | TEXT    | Lowercase entity value |
+
+### `memory_schema_version`
+| Column       | Type    | Description |
+|--------------|---------|-------------|
+| `version`    | INTEGER | Schema version number |
+| `applied_at` | INTEGER | Unix timestamp when version was applied |
+
+### Indexes
+- `idx_memory_created_at` — fast date-range queries on entries
+- `idx_memory_updated_at` — fast sort by last modified
+- `idx_memory_tags_tag` — fast tag lookups
+- `idx_memory_tags_entry` — fast tag fetch per entry
+- `idx_memory_entities` — fast entity name lookups
+- `idx_memory_entities_entry` — fast entity fetch per entry
+
+---
+
+## Migration
+
+Schema migrations are applied automatically via the `migrate()` function on plugin load. A `memory_schema_version` table tracks applied versions. New columns are added safely with `ALTER TABLE … ADD COLUMN` (no-op if already present).
+
+For data migration between instances, use `memory_export` + `memory_import`.
