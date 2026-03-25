@@ -1,8 +1,8 @@
 {
   "id": "ton-trading-bot",
   "name": "TON Trading Bot",
-  "version": "1.0.0",
-  "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, and DEX swap execution. The LLM composes these into trading strategies.",
+  "version": "2.0.0",
+  "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, risk management, and automation. The LLM composes these into trading strategies.",
   "author": {
     "name": "xlabtg",
     "url": "https://github.com/xlabtg"
@@ -35,6 +35,66 @@
     {
       "name": "ton_trading_record_trade",
       "description": "Close an open trade in the journal and record final PnL"
+    },
+    {
+      "name": "ton_trading_get_arbitrage_opportunities",
+      "description": "Find cross-DEX price differences for a token pair across StonFi, DeDust, TONCO, and swap.coffee"
+    },
+    {
+      "name": "ton_trading_get_token_listings",
+      "description": "Fetch recently listed tokens on TON DEXes for sniper trading strategies"
+    },
+    {
+      "name": "ton_trading_get_token_info",
+      "description": "Get detailed information about a specific token: price, market cap, holders, volume"
+    },
+    {
+      "name": "ton_trading_validate_token",
+      "description": "Safety-check a token before sniping: liquidity, volume, and rug-pull risk signals"
+    },
+    {
+      "name": "ton_trading_get_top_traders",
+      "description": "Find top-performing trader wallets on TON ranked by win rate and volume"
+    },
+    {
+      "name": "ton_trading_get_trader_performance",
+      "description": "Analyse the on-chain trading performance of a specific wallet for copy trading"
+    },
+    {
+      "name": "ton_trading_get_active_pools",
+      "description": "List active liquidity pools on TON DEXes sorted by 24-h volume"
+    },
+    {
+      "name": "ton_trading_get_farms_with_apy",
+      "description": "List yield farming opportunities on TON DEXes with estimated APY"
+    },
+    {
+      "name": "ton_trading_get_pool_volume",
+      "description": "Get detailed volume statistics for a specific liquidity pool"
+    },
+    {
+      "name": "ton_trading_backtest",
+      "description": "Replay a strategy against trade journal history and return win rate, PnL, and Sharpe ratio"
+    },
+    {
+      "name": "ton_trading_calculate_risk_metrics",
+      "description": "Calculate VaR, max drawdown, Sharpe ratio, and win/loss statistics from trade history"
+    },
+    {
+      "name": "ton_trading_set_stop_loss",
+      "description": "Register a stop-loss and optional take-profit rule for an open trade"
+    },
+    {
+      "name": "ton_trading_get_optimal_position_size",
+      "description": "Calculate optimal position size using Kelly Criterion and fixed-fraction methods"
+    },
+    {
+      "name": "ton_trading_schedule_trade",
+      "description": "Store a pending trade for future execution at a specified datetime"
+    },
+    {
+      "name": "ton_trading_get_scheduled_trades",
+      "description": "List pending scheduled trades and flag which ones are due for execution"
     }
   ],
   "defaultConfig": {
@@ -44,7 +104,7 @@
     "simulationBalance": 1000
   },
   "permissions": [],
-  "tags": ["trading", "ton", "dex", "portfolio", "simulation"],
+  "tags": ["trading", "ton", "dex", "portfolio", "simulation", "arbitrage", "sniper", "copy-trading", "farming", "backtesting", "risk-management"],
   "repository": "https://github.com/xlabtg/teleton-plugins",
   "funding": null
 }
