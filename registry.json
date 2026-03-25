@@ -208,6 +208,14 @@
       "author": "xlabtg",
       "tags": ["github", "development", "automation", "git", "ci-cd"],
       "path": "plugins/github-dev-assistant"
+    },
+    {
+      "id": "memory",
+      "name": "Persistent Memory",
+      "description": "Persistent memory with advanced filtering — store and retrieve entries by tags, entities, date range, or free text",
+      "author": "xlabtg",
+      "tags": ["memory", "storage", "search", "tags", "utility"],
+      "path": "plugins/memory"
     }
   ]
 }

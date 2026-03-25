@@ -1,0 +1,24 @@
+{
+  "id": "memory",
+  "name": "Persistent Memory",
+  "version": "1.0.0",
+  "description": "Persistent memory with advanced filtering — store and retrieve entries by tags, entities, date range, or free text",
+  "author": {
+    "name": "xlabtg",
+    "url": "https://github.com/xlabtg"
+  },
+  "license": "MIT",
+  "entry": "index.js",
+  "teleton": ">=1.0.0",
+  "sdkVersion": ">=1.0.0",
+  "tools": [
+    { "name": "memory_store",     "description": "Save a memory entry with optional tags and auto-detected entities" },
+    { "name": "memory_search",    "description": "Search memory entries by tags, entity, date range, or free text" },
+    { "name": "memory_delete",    "description": "Delete a memory entry by ID" },
+    { "name": "memory_list_tags", "description": "List all tags and entities in use with counts" }
+  ],
+  "permissions": [],
+  "tags": ["memory", "storage", "search", "tags", "utility"],
+  "repository": "https://github.com/xlabtg/teleton-plugins",
+  "funding": null
+}
