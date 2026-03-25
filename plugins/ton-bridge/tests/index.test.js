@@ -135,7 +135,6 @@ describe("ton-bridge plugin", () => {
       assert.equal(result.data.chat_id, 111);
       assert.equal(capturedChatId, 111);
       assert.ok(capturedText, "message text should be provided");
-      assert.ok(capturedText.includes("TONBridge_robot"), "message text should include Mini App link");
     });
 
     it("uses custom message when provided", async () => {
@@ -154,52 +153,43 @@ describe("ton-bridge plugin", () => {
     });
 
     it("uses custom buttonText when provided", async () => {
-      let capturedText;
+      let capturedOpts;
       const sdk = makeSdk({
         telegram: {
-          sendMessage: async (chatId, text) => {
-            capturedText = text;
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
             return 1;
           },
         },
       });
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
       await tool.execute({ buttonText: "Open Bridge" }, makeContext());
-      assert.ok(capturedText.includes("Open Bridge"), "message should include custom button text");
+      assert.ok(
+        capturedOpts?.inlineKeyboard?.[0]?.[0]?.text === "Open Bridge",
+        "inline keyboard button should have custom button text"
+      );
     });
 
     it("falls back to sdk.pluginConfig.buttonText when no buttonText param", async () => {
-      let capturedText;
+      let capturedOpts;
       const sdk = makeSdk({
         pluginConfig: { buttonText: "My Bridge Button", startParam: "" },
         telegram: {
-          sendMessage: async (chatId, text) => {
-            capturedText = text;
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
             return 1;
           },
         },
       });
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
       await tool.execute({}, makeContext());
-      assert.ok(capturedText.includes("My Bridge Button"), "message should include config button text");
+      assert.ok(
+        capturedOpts?.inlineKeyboard?.[0]?.[0]?.text === "My Bridge Button",
+        "inline keyboard button should have config button text"
+      );
     });
 
-    it("message text includes TON Bridge URL", async () => {
-      let capturedText;
-      const sdk = makeSdk({
-        telegram: {
-          sendMessage: async (chatId, text) => {
-            capturedText = text;
-            return 1;
-          },
-        },
-      });
-      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
-      await tool.execute({}, makeContext());
-      assert.ok(capturedText.includes("TONBridge_robot"), `message should include TONBridge_robot URL, got: ${capturedText}`);
-    });
-
-    it("does not pass inlineKeyboard option to sendMessage", async () => {
+    it("passes inlineKeyboard with TON Bridge URL button to sendMessage", async () => {
       let capturedOpts;
       const sdk = makeSdk({
         telegram: {
@@ -211,7 +201,13 @@ describe("ton-bridge plugin", () => {
       });
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
       await tool.execute({}, makeContext());
-      assert.equal(capturedOpts, undefined, "should not pass options with inlineKeyboard");
+      assert.ok(capturedOpts, "opts should be passed to sendMessage");
+      assert.ok(capturedOpts.inlineKeyboard, "opts should have inlineKeyboard");
+      assert.ok(Array.isArray(capturedOpts.inlineKeyboard), "inlineKeyboard should be an array");
+      const button = capturedOpts.inlineKeyboard[0][0];
+      assert.ok(button, "should have at least one button in first row");
+      assert.ok(button.url, "button should have a url property");
+      assert.ok(button.url.includes("TONBridge_robot"), `button url should include Mini App link, got: ${button.url}`);
     });
 
     it("returns failure when sendMessage throws", async () => {
@@ -251,6 +247,24 @@ describe("ton-bridge plugin", () => {
       assert.ok(capturedText.toLowerCase().includes("bridge"), "about message should mention bridge");
     });
 
+    it("passes inlineKeyboard with URL button to sendMessage", async () => {
+      let capturedOpts;
+      const sdk = makeSdk({
+        telegram: {
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_about");
+      await tool.execute({}, makeContext());
+      assert.ok(capturedOpts?.inlineKeyboard, "opts should have inlineKeyboard");
+      const button = capturedOpts.inlineKeyboard[0][0];
+      assert.ok(button.url, "button should have a url property");
+      assert.ok(button.url.includes("TONBridge_robot"), `button url should include Mini App link, got: ${button.url}`);
+    });
+
     it("returns failure when sendMessage throws", async () => {
       const sdk = makeSdk({
         telegram: {
@@ -265,11 +279,12 @@ describe("ton-bridge plugin", () => {
 
   describe("ton_bridge_custom_message", () => {
     it("sends customMessage as text", async () => {
-      let capturedText;
+      let capturedText, capturedOpts;
       const sdk = makeSdk({
         telegram: {
-          sendMessage: async (chatId, text) => {
+          sendMessage: async (chatId, text, opts) => {
             capturedText = text;
+            capturedOpts = opts;
             return 1;
           },
         },
@@ -277,7 +292,7 @@ describe("ton-bridge plugin", () => {
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_custom_message");
       await tool.execute({ customMessage: "Hello TON!" }, makeContext());
       assert.ok(capturedText.startsWith("Hello TON!"), "message should start with custom message");
-      assert.ok(capturedText.includes("TONBridge_robot"), "message should include Mini App link");
+      assert.ok(capturedOpts?.inlineKeyboard?.[0]?.[0]?.url?.includes("TONBridge_robot"), "inline keyboard button url should include Mini App link");
     });
 
     it("returns success with message_id and chat_id", async () => {
@@ -341,39 +356,89 @@ describe("ton-bridge plugin", () => {
     });
   });
 
+  describe("inline keyboard URL button", () => {
+    it("button text matches configured buttonText", async () => {
+      let capturedOpts;
+      const sdk = makeSdk({
+        pluginConfig: { buttonText: "🚀 TON Bridge", startParam: "" },
+        telegram: {
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
+      await tool.execute({}, makeContext());
+      assert.equal(capturedOpts?.inlineKeyboard?.[0]?.[0]?.text, "🚀 TON Bridge", "button text should include emoji when configured");
+    });
+
+    it("button text works without emoji", async () => {
+      let capturedOpts;
+      const sdk = makeSdk({
+        telegram: {
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
+      await tool.execute({ buttonText: "TON Bridge" }, makeContext());
+      assert.equal(capturedOpts?.inlineKeyboard?.[0]?.[0]?.text, "TON Bridge", "button text should work without emoji");
+    });
+
+    it("inline keyboard has exactly one row with one button", async () => {
+      let capturedOpts;
+      const sdk = makeSdk({
+        telegram: {
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
+            return 1;
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
+      await tool.execute({}, makeContext());
+      assert.equal(capturedOpts.inlineKeyboard.length, 1, "should have one row");
+      assert.equal(capturedOpts.inlineKeyboard[0].length, 1, "should have one button in the row");
+    });
+  });
+
   describe("startParam URL building", () => {
-    it("appends startParam to URL when set", async () => {
-      let capturedText;
+    it("appends startParam to URL in button when set", async () => {
+      let capturedOpts;
       const sdk = makeSdk({
         pluginConfig: { buttonText: "Bridge", startParam: "myref" },
         telegram: {
-          sendMessage: async (chatId, text) => {
-            capturedText = text;
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
             return 1;
           },
         },
       });
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
       await tool.execute({}, makeContext());
-      assert.ok(capturedText.includes("myref"), `message should include startParam, got: ${capturedText}`);
+      const buttonUrl = capturedOpts?.inlineKeyboard?.[0]?.[0]?.url;
+      assert.ok(buttonUrl?.includes("myref"), `button url should include startParam, got: ${buttonUrl}`);
     });
 
     it("does not append startParam when empty", async () => {
-      let capturedText;
+      let capturedOpts;
       const sdk = makeSdk({
         pluginConfig: { buttonText: "Bridge", startParam: "" },
         telegram: {
-          sendMessage: async (chatId, text) => {
-            capturedText = text;
+          sendMessage: async (chatId, text, opts) => {
+            capturedOpts = opts;
             return 1;
           },
         },
       });
       const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
       await tool.execute({}, makeContext());
-      // URL in message should be the base URL without extra params appended via =
-      assert.ok(capturedText.includes("startapp"), `message should include base URL ending with 'startapp'`);
-      assert.ok(!capturedText.includes("startapp="), `message URL should not have startParam appended, got: ${capturedText}`);
+      const buttonUrl = capturedOpts?.inlineKeyboard?.[0]?.[0]?.url;
+      assert.ok(buttonUrl?.includes("startapp"), `button url should include base URL ending with 'startapp'`);
+      assert.ok(!buttonUrl?.includes("startapp="), `button url should not have startParam appended, got: ${buttonUrl}`);
     });
   });
 });
