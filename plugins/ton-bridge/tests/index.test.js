@@ -221,6 +221,22 @@ describe("ton-bridge plugin", () => {
       assert.equal(result.success, false);
       assert.ok(result.error);
     });
+
+    it("returns failure when context.chatId is undefined", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
+      const result = await tool.execute({}, makeContext({ chatId: undefined }));
+      assert.equal(result.success, false);
+      assert.ok(result.error, "should return an error message");
+    });
+
+    it("returns failure when context is undefined", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_open");
+      const result = await tool.execute({}, undefined);
+      assert.equal(result.success, false);
+      assert.ok(result.error, "should return an error message");
+    });
   });
 
   describe("ton_bridge_about", () => {
@@ -275,6 +291,14 @@ describe("ton-bridge plugin", () => {
       const result = await tool.execute({}, makeContext());
       assert.equal(result.success, false);
     });
+
+    it("returns failure when context.chatId is undefined", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_about");
+      const result = await tool.execute({}, makeContext({ chatId: undefined }));
+      assert.equal(result.success, false);
+      assert.ok(result.error, "should return an error message");
+    });
   });
 
   describe("ton_bridge_custom_message", () => {
@@ -314,6 +338,14 @@ describe("ton-bridge plugin", () => {
       const result = await tool.execute({ customMessage: "test" }, makeContext());
       assert.equal(result.success, false);
       assert.ok(result.error);
+    });
+
+    it("returns failure when context.chatId is undefined", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_bridge_custom_message");
+      const result = await tool.execute({ customMessage: "test" }, makeContext({ chatId: undefined }));
+      assert.equal(result.success, false);
+      assert.ok(result.error, "should return an error message");
     });
 
     it("uses customMessage parameter as required", () => {
