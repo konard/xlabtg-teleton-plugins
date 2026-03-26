@@ -87,6 +87,10 @@ export const tools = (sdk) => [
           `ton_bridge_open called by ${context?.senderId ?? "unknown"}`
         );
 
+        if (!context?.chatId) {
+          return { success: false, error: "Missing chatId in context" };
+        }
+
         const { text: fullText, opts } = buildMessageWithLink(text, buttonText, url);
 
         const messageId = await sdk.telegram.sendMessage(
@@ -136,6 +140,10 @@ export const tools = (sdk) => [
         sdk.log?.info(
           `ton_bridge_about called by ${context?.senderId ?? "unknown"}`
         );
+
+        if (!context?.chatId) {
+          return { success: false, error: "Missing chatId in context" };
+        }
 
         const aboutText = "About TON Bridge\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.";
         const { text: fullText, opts } = buildMessageWithLink(aboutText, buttonText, url);
@@ -199,6 +207,10 @@ export const tools = (sdk) => [
         sdk.log?.info(
           `ton_bridge_custom_message called by ${context?.senderId ?? "unknown"}`
         );
+
+        if (!context?.chatId) {
+          return { success: false, error: "Missing chatId in context" };
+        }
 
         const { text: fullText, opts } = buildMessageWithLink(customMessage, buttonText, url);
 
