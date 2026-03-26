@@ -378,6 +378,29 @@ describe("memory plugin", () => {
       assert.ok(personEntity, "should extract @anton as person entity");
     });
 
+    it("accepts tags as a JSON-encoded string (LLM serialization quirk)", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "memory_store");
+      const result = await tool.execute(
+        { content: "Important rule", tags: '["rules", "github"]' },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok(result.data.tags.includes("#rules"), "should parse #rules from JSON string");
+      assert.ok(result.data.tags.includes("#github"), "should parse #github from JSON string");
+    });
+
+    it("accepts tags as a single plain string", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "memory_store");
+      const result = await tool.execute(
+        { content: "Note", tags: "work" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok(result.data.tags.includes("#work"), "should treat plain string as a single tag");
+    });
+
     it("returns error when content is empty", async () => {
       const sdk = makeSdk();
       const tool = mod.tools(sdk).find((t) => t.name === "memory_store");
@@ -461,6 +484,17 @@ describe("memory plugin", () => {
       const result = await search.execute({ end_date: "bad" }, makeContext());
       assert.equal(result.success, false);
       assert.ok(result.error.includes("end_date"));
+    });
+
+    it("accepts tags filter as a JSON-encoded string (LLM serialization quirk)", async () => {
+      const sdk = makeSdk();
+      const store = mod.tools(sdk).find((t) => t.name === "memory_store");
+      await store.execute({ content: "GitHub workflow note", tags: ["github"] }, makeContext());
+
+      const search = mod.tools(sdk).find((t) => t.name === "memory_search");
+      const result = await search.execute({ tags: '["github"]' }, makeContext());
+      assert.equal(result.success, true);
+      assert.ok(result.data.count >= 1, "should find entry via JSON-string tags filter");
     });
   });
 

@@ -138,6 +138,33 @@ function extractEntities(text) {
   return entities;
 }
 
+// ─── Helper: coerce a tags value to an array ─────────────────────────────────
+
+/**
+ * LLMs occasionally serialize array arguments as a JSON string
+ * (e.g. '["work","urgent"]' instead of ["work","urgent"]).
+ * This helper normalises both forms so downstream code always receives
+ * a plain JS array (or undefined/null for missing values).
+ */
+function coerceToArray(value) {
+  if (value == null) return value;
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        // Not valid JSON — fall through and treat as a single tag
+      }
+    }
+    // Single tag provided as a plain string (e.g. "work")
+    return trimmed ? [trimmed] : [];
+  }
+  return value;
+}
+
 // ─── Helper: parse tags from content and explicit list ───────────────────────
 
 function parseTags(content, extraTags) {
@@ -148,9 +175,10 @@ function parseTags(content, extraTags) {
     tags.add(m[1].toLowerCase());
   }
 
-  // Explicitly provided tags
-  if (Array.isArray(extraTags)) {
-    for (const t of extraTags) {
+  // Explicitly provided tags — coerce to array first to handle JSON strings
+  const normalised = coerceToArray(extraTags);
+  if (Array.isArray(normalised)) {
+    for (const t of normalised) {
       if (typeof t === "string" && t.trim()) {
         tags.add(t.replace(/^#/, "").toLowerCase().trim());
       }
@@ -205,9 +233,11 @@ export const tools = (sdk) => [
           description: "The text to remember. May include inline #tags and @mentions.",
         },
         tags: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional list of tags to attach (e.g. [\"work\", \"urgent\"]). #prefix is optional.",
+          oneOf: [
+            { type: "array", items: { type: "string" } },
+            { type: "string" },
+          ],
+          description: "Optional list of tags to attach (e.g. [\"work\", \"urgent\"]). #prefix is optional. May also be provided as a JSON-encoded string.",
         },
       },
       required: ["content"],
@@ -358,9 +388,11 @@ export const tools = (sdk) => [
           description: "Free-text search within memory content (case-insensitive substring match).",
         },
         tags: {
-          type: "array",
-          items: { type: "string" },
-          description: "Filter entries that have ALL of the specified tags.",
+          oneOf: [
+            { type: "array", items: { type: "string" } },
+            { type: "string" },
+          ],
+          description: "Filter entries that have ALL of the specified tags. May also be provided as a JSON-encoded string.",
         },
         entity: {
           type: "string",
@@ -438,8 +470,10 @@ export const tools = (sdk) => [
         }
 
         // Tag filtering: entry must have ALL requested tags
-        const normalizedTags = Array.isArray(filterTags)
-          ? filterTags.map((t) => t.replace(/^#/, "").toLowerCase().trim()).filter(Boolean)
+        // coerceToArray handles JSON-string inputs from LLMs
+        const coercedTags = coerceToArray(filterTags);
+        const normalizedTags = Array.isArray(coercedTags)
+          ? coercedTags.map((t) => t.replace(/^#/, "").toLowerCase().trim()).filter(Boolean)
           : [];
 
         for (const tag of normalizedTags) {
@@ -515,9 +549,11 @@ export const tools = (sdk) => [
           description: "New content to replace the existing entry. May include inline #tags and @mentions.",
         },
         tags: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional list of tags to attach (replaces existing tags). #prefix is optional.",
+          oneOf: [
+            { type: "array", items: { type: "string" } },
+            { type: "string" },
+          ],
+          description: "Optional list of tags to attach (replaces existing tags). #prefix is optional. May also be provided as a JSON-encoded string.",
         },
       },
       required: ["id"],
