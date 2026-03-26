@@ -4,6 +4,7 @@
  * Covers:
  *  - github_delete_file     — delete a file from a repository
  *  - github_list_directory  — list contents of a directory
+ *  - github_list_files      — alias for github_list_directory with identical behaviour
  *  - github_search_code     — search for code patterns in a repository
  *  - github_download_file   — download a file and optionally save it locally
  *
@@ -200,6 +201,90 @@ export function buildFileOpsTools(sdk) {
           };
         } catch (err) {
           return { success: false, error: `Failed to list directory: ${formatError(err)}` };
+        }
+      },
+    },
+
+    // -------------------------------------------------------------------------
+    // Tool: github_list_files
+    // -------------------------------------------------------------------------
+    {
+      name: "github_list_files",
+      description:
+        "Use this when the user wants to list files in a GitHub repository or browse a directory. " +
+        "Returns a list of files and subdirectories with their types and sizes. " +
+        "Equivalent to github_list_directory.",
+      category: "data-bearing",
+      parameters: {
+        type: "object",
+        properties: {
+          owner: {
+            type: "string",
+            description: "Repository owner",
+          },
+          repo: {
+            type: "string",
+            description: "Repository name",
+          },
+          path: {
+            type: "string",
+            description: "Directory path within the repo (default: repo root '')",
+          },
+          ref: {
+            type: "string",
+            description: "Branch, tag, or commit SHA to list from (default: repo default branch)",
+          },
+        },
+        required: ["owner", "repo"],
+      },
+      execute: async (params, _context) => {
+        try {
+          const check = validateRequired(params, ["owner", "repo"]);
+          if (!check.valid) return { success: false, error: check.error };
+
+          const client = createGitHubClient(sdk);
+          const queryParams = {};
+          if (params.ref) queryParams.ref = params.ref;
+
+          const dirPath = params.path ?? "";
+          const apiPath = dirPath
+            ? `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents/${dirPath}`
+            : `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/contents`;
+
+          const data = await client.get(apiPath, queryParams);
+
+          if (!Array.isArray(data)) {
+            return {
+              success: false,
+              error: `Path "${dirPath}" is a file, not a directory. Use github_get_file to read a file.`,
+            };
+          }
+
+          const entries = data.map((e) => ({
+            name: e.name,
+            path: e.path,
+            type: e.type,
+            size: e.size ?? 0,
+            sha: e.sha,
+            html_url: e.html_url,
+          }));
+
+          sdk.log.info(
+            `github_list_files: listed ${entries.length} entries at "${dirPath}" in ${params.owner}/${params.repo}`
+          );
+
+          return {
+            success: true,
+            data: {
+              path: dirPath || "/",
+              repo: `${params.owner}/${params.repo}`,
+              ref: params.ref ?? null,
+              entries,
+              count: entries.length,
+            },
+          };
+        } catch (err) {
+          return { success: false, error: `Failed to list files: ${formatError(err)}` };
         }
       },
     },

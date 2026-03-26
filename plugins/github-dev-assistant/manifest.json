@@ -1,7 +1,7 @@
 {
   "id": "github-dev-assistant",
   "name": "GitHub Dev Assistant",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Complete GitHub development workflow automation — repos, files, branches, PRs, issues, commits, Actions workflows, labels, repo info, user profile, gists, notifications, starring, security alerts, and discussions via Personal Access Token",
   "author": {
     "name": "xlabtg",
@@ -34,10 +34,12 @@
     { "name": "github_create_branch", "description": "Create a new branch in a GitHub repository" },
     { "name": "github_delete_file", "description": "Delete a file from a GitHub repository" },
     { "name": "github_list_directory", "description": "List contents of a directory in a GitHub repository" },
+    { "name": "github_list_files", "description": "List files in a GitHub repository or directory" },
     { "name": "github_search_code", "description": "Search for code patterns within a GitHub repository" },
     { "name": "github_download_file", "description": "Download a file from GitHub and return its content" },
     { "name": "github_create_pr", "description": "Create a new pull request" },
     { "name": "github_list_prs", "description": "List pull requests in a repository" },
+    { "name": "github_get_pull_request", "description": "Get detailed information about a specific pull request" },
     { "name": "github_merge_pr", "description": "Merge a pull request" },
     { "name": "github_list_pull_request_reviews", "description": "List reviews on a pull request" },
     { "name": "github_create_issue", "description": "Create a new issue in a repository" },

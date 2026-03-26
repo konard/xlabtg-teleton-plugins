@@ -1,17 +1,17 @@
 /**
  * github-dev-assistant — Full GitHub Development Workflow Automation
  *
- * Provides 57 tools covering:
+ * Provides 60 tools covering:
  *   Auth (1):          github_check_auth
  *   Repos (10):        github_list_repos, github_create_repo, github_fork_repo,
  *                      github_search_repos, github_list_branches, github_push_files,
  *                      github_get_repo_tree, github_list_tags, github_list_releases,
  *                      github_get_latest_release
- *   Files (7):         github_get_file, github_update_file, github_create_branch,
- *                      github_delete_file, github_list_directory, github_search_code,
- *                      github_download_file
- *   PRs (8):           github_create_pr, github_list_prs, github_merge_pr,
- *                      github_list_comments, github_list_pull_request_reviews,
+ *   Files (8):         github_get_file, github_update_file, github_create_branch,
+ *                      github_delete_file, github_list_directory, github_list_files,
+ *                      github_search_code, github_download_file
+ *   PRs (9):           github_create_pr, github_list_prs, github_get_pull_request,
+ *                      github_merge_pr, github_list_comments, github_list_pull_request_reviews,
  *                      github_search_issues, github_update_pr, github_add_pr_review
  *   Issues (8):        github_create_issue, github_list_issues, github_comment_issue,
  *                      github_close_issue, github_update_issue, github_reopen_issue,
@@ -66,7 +66,7 @@ import { formatError } from "./lib/utils.js";
 
 export const manifest = {
   name: "github-dev-assistant",
-  version: "3.0.0",
+  version: "3.1.0",
   sdkVersion: ">=1.0.0",
   description:
     "Complete GitHub development workflow automation — repos, files, branches, PRs, issues, commits, Actions workflows, labels, repo info, user profile, gists, notifications, starring, security alerts, and discussions via Personal Access Token",
@@ -157,7 +157,7 @@ export const tools = (sdk) => {
   const repoTools = buildRepoOpsTools(sdk);
 
   // ---------------------------------------------------------------------------
-  // Pull request tools (3)
+  // Pull request tools (4)
   // ---------------------------------------------------------------------------
   const prTools = buildPRManagerTools(sdk);
 
@@ -167,7 +167,7 @@ export const tools = (sdk) => {
   const issueTools = buildIssueTrackerTools(sdk);
 
   // ---------------------------------------------------------------------------
-  // Extended file operations (4): delete, list directory, search code, download
+  // Extended file operations (5): delete, list directory, list files, search code, download
   // ---------------------------------------------------------------------------
   const fileOpsTools = buildFileOpsTools(sdk);
 
@@ -226,9 +226,9 @@ export const tools = (sdk) => {
   return [
     ...authTools,                  //  1: github_check_auth
     ...repoTools,                  //  5: github_list_repos, github_create_repo, github_get_file, github_update_file, github_create_branch
-    ...prTools,                    //  3: github_create_pr, github_list_prs, github_merge_pr
+    ...prTools,                    //  4: github_create_pr, github_list_prs, github_get_pull_request, github_merge_pr
     ...issueTools,                 //  5: github_create_issue, github_list_issues, github_comment_issue, github_close_issue, github_trigger_workflow
-    ...fileOpsTools,               //  4: github_delete_file, github_list_directory, github_search_code, github_download_file
+    ...fileOpsTools,               //  5: github_delete_file, github_list_directory, github_list_files, github_search_code, github_download_file
     ...commitOpsTools,             //  2: github_list_commits, github_get_commit
     ...issuePROpsTools,            //  5: github_list_comments, github_update_issue, github_reopen_issue, github_assign_issue, github_list_pull_request_reviews
     ...repoInfoOpsTools,           //  3: github_list_languages, github_list_collaborators, github_list_teams

@@ -2,9 +2,10 @@
  * Pull request management for the github-dev-assistant plugin.
  *
  * Covers:
- *  - github_create_pr  — create a new pull request
- *  - github_list_prs   — list pull requests with filtering
- *  - github_merge_pr   — merge a pull request (with require_pr_review check)
+ *  - github_create_pr          — create a new pull request
+ *  - github_list_prs           — list pull requests with filtering
+ *  - github_merge_pr           — merge a pull request (with require_pr_review check)
+ *  - github_get_pull_request   — get full details of a specific pull request
  *
  * All tools create a fresh GitHub client per execution to pick up the latest
  * token from sdk.secrets (avoids stale client issues).
@@ -366,6 +367,97 @@ export function buildPRManagerTools(sdk) {
           };
         } catch (err) {
           return { success: false, error: `Failed to merge pull request: ${formatError(err)}` };
+        }
+      },
+    },
+
+    // -------------------------------------------------------------------------
+    // Tool: github_get_pull_request
+    // -------------------------------------------------------------------------
+    {
+      name: "github_get_pull_request",
+      description:
+        "Use this when the user wants to get detailed information about a specific pull request on GitHub. " +
+        "Returns the PR title, body, state, author, labels, head/base branches, review status, and more.",
+      category: "data-bearing",
+      parameters: {
+        type: "object",
+        properties: {
+          owner: {
+            type: "string",
+            description: "Repository owner",
+          },
+          repo: {
+            type: "string",
+            description: "Repository name",
+          },
+          pull_number: {
+            type: "integer",
+            description: "Pull request number",
+          },
+        },
+        required: ["owner", "repo", "pull_number"],
+      },
+      execute: async (params, _context) => {
+        try {
+          const check = validateRequired(params, ["owner", "repo", "pull_number"]);
+          if (!check.valid) return { success: false, error: check.error };
+
+          const prNumber = Math.floor(Number(params.pull_number));
+          if (!Number.isFinite(prNumber) || prNumber < 1) {
+            return { success: false, error: "pull_number must be a positive integer" };
+          }
+
+          const client = createGitHubClient(sdk);
+
+          const pr = await client.get(
+            `/repos/${encodeURIComponent(params.owner)}/${encodeURIComponent(params.repo)}/pulls/${prNumber}`
+          );
+
+          sdk.log.info(
+            `github_get_pull_request: fetched PR #${prNumber} from ${params.owner}/${params.repo}`
+          );
+
+          return {
+            success: true,
+            data: {
+              number: pr.number,
+              title: pr.title,
+              body: pr.body ?? null,
+              state: pr.state,
+              draft: pr.draft ?? false,
+              merged: pr.merged ?? false,
+              mergeable: pr.mergeable ?? null,
+              mergeable_state: pr.mergeable_state ?? null,
+              author: pr.user?.login ?? null,
+              assignees: (pr.assignees ?? []).map((a) => a.login),
+              labels: (pr.labels ?? []).map((l) => l.name),
+              head: {
+                ref: pr.head?.ref ?? null,
+                sha: pr.head?.sha ?? null,
+                repo: pr.head?.repo?.full_name ?? null,
+              },
+              base: {
+                ref: pr.base?.ref ?? null,
+                sha: pr.base?.sha ?? null,
+                repo: pr.base?.repo?.full_name ?? null,
+              },
+              html_url: pr.html_url,
+              commits: pr.commits ?? null,
+              additions: pr.additions ?? null,
+              deletions: pr.deletions ?? null,
+              changed_files: pr.changed_files ?? null,
+              created_at: pr.created_at,
+              updated_at: pr.updated_at,
+              closed_at: pr.closed_at ?? null,
+              merged_at: pr.merged_at ?? null,
+              merged_by: pr.merged_by?.login ?? null,
+              review_decision: pr.review_decision ?? null,
+              requested_reviewers: (pr.requested_reviewers ?? []).map((r) => r.login),
+            },
+          };
+        } catch (err) {
+          return { success: false, error: `Failed to get pull request: ${formatError(err)}` };
         }
       },
     },
