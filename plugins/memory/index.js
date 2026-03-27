@@ -292,7 +292,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_store error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Check that content is a valid string. Use memory_list_tags to see available tags.",
         };
       }
@@ -325,8 +325,8 @@ export const tools = (sdk) => [
     },
     execute: async (params, _context) => {
       try {
-        const limit = Math.min(Number(params.limit) || 20, 100);
-        const offset = Math.max(Number(params.offset) || 0, 0);
+        const limit = Math.min(Number(params.limit ?? 20), 100);
+        const offset = Math.max(Number(params.offset ?? 0), 0);
 
         const total = sdk.db
           .prepare(`SELECT COUNT(*) AS n FROM memory_entries`)
@@ -362,7 +362,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_list error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Ensure limit is 1–100 and offset is non-negative.",
         };
       }
@@ -522,7 +522,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_search error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Try memory_list_tags to see available tags and entities.",
         };
       }
@@ -636,7 +636,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_update error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Use memory_list or memory_search to find valid entry IDs.",
         };
       }
@@ -696,7 +696,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_delete error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Use memory_list or memory_search to find valid entry IDs.",
         };
       }
@@ -752,7 +752,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_list_tags error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "If the database is empty, try memory_store to add your first entry.",
         };
       }
@@ -804,7 +804,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_export error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Ensure the database is accessible and not corrupted.",
         };
       }
@@ -926,7 +926,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_import error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Ensure entries is a valid array from memory_export output.",
         };
       }
@@ -1059,7 +1059,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_relate error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Ensure source_id and target_id are valid, distinct entry IDs.",
         };
       }
@@ -1230,7 +1230,7 @@ export const tools = (sdk) => [
         sdk.log.error(`memory_find_connections error: ${error.message}`);
         return {
           success: false,
-          error: error.message,
+          error: String(error.message).slice(0, 500),
           hint: "Ensure entry_id is a valid ID and enableAssociativeMode is enabled.",
         };
       }
