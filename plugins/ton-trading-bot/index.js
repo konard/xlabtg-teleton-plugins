@@ -765,7 +765,11 @@ export const tools = (sdk) => [
           return { success: false, error: `GeckoTerminal API returned ${res.status}` };
         }
 
-        const json = await res.json();
+        const [json, tonPrice] = await Promise.all([
+          res.json(),
+          sdk.ton.getPrice(),
+        ]);
+        const tonPriceUsd = tonPrice?.usd ?? 3;
         const pools = (json?.data ?? [])
           .map((p) => {
             const attr = p.attributes ?? {};
@@ -783,8 +787,7 @@ export const tools = (sdk) => [
             };
           })
           .filter((p) => {
-            // Approximate TON price filter — reserve_in_usd / ~3 USD per TON
-            const reserveTon = p.reserve_in_usd / 3;
+            const reserveTon = p.reserve_in_usd / tonPriceUsd;
             return reserveTon >= minLiquidity;
           })
           .slice(0, limit);
@@ -909,7 +912,8 @@ export const tools = (sdk) => [
         const marketCapUsd = parseFloat(attr.market_cap_usd ?? 0);
         const volumeUsd24h = parseFloat(attr.volume_usd?.h24 ?? 0);
         const reserveUsd = parseFloat(attr.reserve_in_usd ?? 0);
-        const reserveTon = reserveUsd / 3; // approximate
+        const tonPrice = await sdk.ton.getPrice();
+        const reserveTon = reserveUsd / (tonPrice?.usd ?? 3);
 
         if (reserveTon < min_liquidity_ton) {
           warnings.push({ type: "low_liquidity", message: `Liquidity (~${reserveTon.toFixed(0)} TON) is below minimum (${min_liquidity_ton} TON)` });
