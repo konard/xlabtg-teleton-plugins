@@ -595,6 +595,90 @@ describe("ton-trading-bot plugin", () => {
       assert.ok(tool.parameters?.required?.includes("trade_id"));
       assert.ok(tool.parameters?.required?.includes("amount_out"));
     });
+
+    it("calculates P&L in USD when currencies differ (USDT→TON trade)", async () => {
+      // Reproduces issue #80: 50 USDT → 37.6 TON at entry_price_usd=1 (USDT),
+      // exit_price_usd=1.33 (TON price in USD). Real P&L should be ~$0, not -$12.40.
+      const openTrade = {
+        id: 10,
+        mode: "simulation",
+        from_asset: "USDT",
+        to_asset: "TON",
+        amount_in: 50,       // 50 USDT spent
+        entry_price_usd: 1,  // 1 USDT = $1
+        amount_out: null,
+        status: "open",
+      };
+      const sdk = makeSdk({ dbRows: { trade: openTrade } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_record_trade");
+      // Closing: received 37.6 TON at $1.33/TON = $50.008 USD value
+      const result = await tool.execute(
+        { trade_id: 10, amount_out: 37.6, exit_price_usd: 1.33 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      // USD value out = 37.6 * 1.33 = 50.008; USD value in = 50 * 1 = 50
+      // pnl = 50.008 - 50 = 0.008 (small positive, not -12.40)
+      assert.ok(result.data.pnl > 0, `pnl should be slightly positive (~0.008), got ${result.data.pnl}`);
+      assert.ok(result.data.pnl < 1, `pnl should be near zero, got ${result.data.pnl}`);
+      assert.equal(result.data.profit_or_loss, "profit");
+    });
+
+    it("calculates P&L correctly for TON→USDT trade using USD prices", async () => {
+      // Buying USDT with TON: 37.6 TON at $1.33 → 50 USDT
+      const openTrade = {
+        id: 11,
+        mode: "simulation",
+        from_asset: "TON",
+        to_asset: "USDT",
+        amount_in: 37.6,     // 37.6 TON spent
+        entry_price_usd: 1.33, // TON = $1.33
+        amount_out: null,
+        status: "open",
+      };
+      const sdk = makeSdk({ dbRows: { trade: openTrade } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_record_trade");
+      // Closing: received 50 USDT at $1/USDT
+      const result = await tool.execute(
+        { trade_id: 11, amount_out: 50, exit_price_usd: 1 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      // USD value out = 50 * 1 = 50; USD value in = 37.6 * 1.33 = 50.008
+      // pnl = 50 - 50.008 = -0.008 (tiny loss, not a huge number)
+      assert.ok(result.data.pnl < 0, `pnl should be slightly negative, got ${result.data.pnl}`);
+      assert.ok(result.data.pnl > -1, `pnl should be near zero, got ${result.data.pnl}`);
+      assert.equal(result.data.profit_or_loss, "loss");
+    });
+
+    it("falls back to raw amount diff when no USD prices provided (backward compat)", async () => {
+      const openTrade = {
+        id: 12,
+        mode: "simulation",
+        from_asset: "TON",
+        to_asset: "TON",
+        amount_in: 10,
+        amount_out: null,
+        status: "open",
+      };
+      const sdk = makeSdk({ dbRows: { trade: openTrade } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_record_trade");
+      const result = await tool.execute({ trade_id: 12, amount_out: 11 }, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.pnl, 1);
+      assert.equal(result.data.profit_or_loss, "profit");
+    });
+
+    it("ton_trading_simulate_trade accepts and stores entry_price_usd", async () => {
+      const sdk = makeSdk({ dbRows: { simBalance: { balance: 1000 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_simulate_trade");
+      const result = await tool.execute(
+        { from_asset: "USDT", to_asset: "TON", amount_in: 50, expected_amount_out: 37.6, entry_price_usd: 1 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.entry_price_usd, 1);
+    });
   });
 
   // ── ton_trading_get_arbitrage_opportunities ─────────────────────────────────

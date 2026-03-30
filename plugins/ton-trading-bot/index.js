@@ -68,6 +68,7 @@ export function migrate(db) {
       to_asset TEXT NOT NULL,
       amount_in REAL NOT NULL,
       amount_out REAL,
+      entry_price_usd REAL,         -- USD price of from_asset at entry (for cross-currency P&L)
       pnl REAL,
       pnl_percent REAL,
       status TEXT NOT NULL,         -- 'open' | 'closed' | 'failed'
@@ -357,11 +358,15 @@ export const tools = (sdk) => [
           type: "string",
           description: "Optional note describing the rationale for this trade",
         },
+        entry_price_usd: {
+          type: "number",
+          description: "USD price of from_asset at trade entry. Required for accurate P&L when trading between non-USD pairs (e.g. TON/USDT). Obtain from ton_trading_get_market_data.",
+        },
       },
       required: ["from_asset", "to_asset", "amount_in", "expected_amount_out"],
     },
     execute: async (params, _context) => {
-      const { from_asset, to_asset, amount_in, expected_amount_out, note } = params;
+      const { from_asset, to_asset, amount_in, expected_amount_out, note, entry_price_usd } = params;
       try {
         const simBalance = getSimBalance(sdk);
         const minBalance = sdk.pluginConfig.minBalanceTON ?? 1;
@@ -388,10 +393,10 @@ export const tools = (sdk) => [
         const tradeId = sdk.db
           .prepare(
             `INSERT INTO trade_journal
-             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, status, note)
-             VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, 'open', ?)`
+             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status, note)
+             VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, ?, 'open', ?)`
           )
-          .run(Date.now(), from_asset, to_asset, amount_in, expected_amount_out, note ?? null)
+          .run(Date.now(), from_asset, to_asset, amount_in, expected_amount_out, entry_price_usd ?? null, note ?? null)
           .lastInsertRowid;
 
         sdk.log.info(
@@ -407,6 +412,7 @@ export const tools = (sdk) => [
             to_asset,
             amount_in,
             expected_amount_out,
+            entry_price_usd: entry_price_usd ?? null,
             new_simulation_balance: from_asset === "TON" ? simBalance - amount_in : simBalance,
             status: "open",
           },
@@ -451,6 +457,10 @@ export const tools = (sdk) => [
           description: 'Preferred DEX: "stonfi", "dedust", or omit to use the best available quote',
           enum: ["stonfi", "dedust"],
         },
+        entry_price_usd: {
+          type: "number",
+          description: "USD price of from_asset at trade entry. Required for accurate P&L when trading between non-USD pairs (e.g. TON/USDT). Obtain from ton_trading_get_market_data.",
+        },
       },
       required: ["from_asset", "to_asset", "amount"],
     },
@@ -461,6 +471,7 @@ export const tools = (sdk) => [
         amount,
         slippage = sdk.pluginConfig.defaultSlippage ?? 0.05,
         dex,
+        entry_price_usd,
       } = params;
 
       try {
@@ -480,15 +491,16 @@ export const tools = (sdk) => [
         const tradeId = sdk.db
           .prepare(
             `INSERT INTO trade_journal
-             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, status)
-             VALUES (?, 'real', 'buy', ?, ?, ?, ?, 'open')`
+             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
+             VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
           )
           .run(
             Date.now(),
             from_asset,
             to_asset,
             parseFloat(amount),
-            result?.expectedOutput ? parseFloat(result.expectedOutput) : null
+            result?.expectedOutput ? parseFloat(result.expectedOutput) : null,
+            entry_price_usd ?? null
           )
           .lastInsertRowid;
 
@@ -551,6 +563,10 @@ export const tools = (sdk) => [
           type: "number",
           description: "Actual amount received when closing the trade",
         },
+        exit_price_usd: {
+          type: "number",
+          description: "USD price of to_asset at trade exit. Required for accurate P&L when trading between non-USD pairs (e.g. TON/USDT). Obtain from ton_trading_get_market_data.",
+        },
         note: {
           type: "string",
           description: "Optional note (e.g. exit reason)",
@@ -559,7 +575,7 @@ export const tools = (sdk) => [
       required: ["trade_id", "amount_out"],
     },
     execute: async (params, _context) => {
-      const { trade_id, amount_out, note } = params;
+      const { trade_id, amount_out, exit_price_usd, note } = params;
       try {
         const entry = sdk.db
           .prepare("SELECT * FROM trade_journal WHERE id = ?")
@@ -573,9 +589,16 @@ export const tools = (sdk) => [
           return { success: false, error: `Trade ${trade_id} is already closed` };
         }
 
-        const pnl = amount_out - entry.amount_in;
+        // Convert amounts to USD when prices are available to handle cross-currency P&L.
+        // Example: 50 USDT → 37.6 TON. Without conversion, pnl = 37.6 - 50 = -12.4 (wrong).
+        // With prices: usdOut = 37.6 * 1.33 = 50.008, usdIn = 50 * 1 = 50, pnl = 0.008 (correct).
+        const entryPriceUsd = entry.entry_price_usd ?? exit_price_usd ?? null;
+        const usdIn = entryPriceUsd != null ? entry.amount_in * entryPriceUsd : entry.amount_in;
+        const usdOut = exit_price_usd != null ? amount_out * exit_price_usd : amount_out;
+
+        const pnl = usdOut - usdIn;
         const pnlPercent =
-          entry.amount_in > 0 ? (pnl / entry.amount_in) * 100 : 0;
+          usdIn > 0 ? (pnl / usdIn) * 100 : 0;
 
         sdk.db
           .prepare(
