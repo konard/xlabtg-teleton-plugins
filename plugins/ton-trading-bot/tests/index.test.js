@@ -172,11 +172,35 @@ describe("ton-trading-bot plugin", () => {
       const executed = [];
       const mockDb = { exec: (sql) => executed.push(sql) };
       assert.doesNotThrow(() => mod.migrate(mockDb));
-      assert.equal(executed.length, 1);
+      // First exec: CREATE TABLE statements; subsequent execs: ALTER TABLE migrations
+      assert.ok(executed.length >= 1);
       assert.ok(executed[0].includes("trade_journal"));
       assert.ok(executed[0].includes("sim_balance"));
       assert.ok(executed[0].includes("stop_loss_rules"));
       assert.ok(executed[0].includes("scheduled_trades"));
+    });
+
+    it("migrate adds entry_price_usd and exit_price_usd columns to trade_journal", () => {
+      const executed = [];
+      const mockDb = { exec: (sql) => executed.push(sql) };
+      mod.migrate(mockDb);
+      // The CREATE TABLE should include both P&L price columns
+      assert.ok(executed[0].includes("entry_price_usd"), "CREATE TABLE should include entry_price_usd");
+      assert.ok(executed[0].includes("exit_price_usd"), "CREATE TABLE should include exit_price_usd");
+      // ALTER TABLE migrations should be present for backward compatibility
+      const allSql = executed.join("\n");
+      assert.ok(allSql.includes("ALTER TABLE trade_journal ADD COLUMN entry_price_usd"), "should include ALTER for entry_price_usd");
+      assert.ok(allSql.includes("ALTER TABLE trade_journal ADD COLUMN exit_price_usd"), "should include ALTER for exit_price_usd");
+    });
+
+    it("migrate handles existing database that already has the columns", () => {
+      // When columns already exist, ALTER TABLE throws — migrate should not propagate the error
+      const mockDb = {
+        exec: (sql) => {
+          if (sql.includes("ALTER TABLE")) throw new Error("duplicate column name");
+        },
+      };
+      assert.doesNotThrow(() => mod.migrate(mockDb));
     });
   });
 

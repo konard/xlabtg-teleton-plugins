@@ -69,6 +69,7 @@ export function migrate(db) {
       amount_in REAL NOT NULL,
       amount_out REAL,
       entry_price_usd REAL,         -- USD price of from_asset at entry (for cross-currency P&L)
+      exit_price_usd REAL,          -- USD price of to_asset at exit (for cross-currency P&L)
       pnl REAL,
       pnl_percent REAL,
       status TEXT NOT NULL,         -- 'open' | 'closed' | 'failed'
@@ -107,6 +108,20 @@ export function migrate(db) {
       status TEXT NOT NULL DEFAULT 'pending'  -- 'pending' | 'executed' | 'cancelled'
     );
   `);
+
+  // Backward-compatible migrations for existing databases created before these columns were added.
+  // SQLite does not support "ADD COLUMN IF NOT EXISTS", so we use a try/catch per column.
+  const alterColumns = [
+    "ALTER TABLE trade_journal ADD COLUMN entry_price_usd REAL",
+    "ALTER TABLE trade_journal ADD COLUMN exit_price_usd REAL",
+  ];
+  for (const sql of alterColumns) {
+    try {
+      db.exec(sql);
+    } catch {
+      // Column already exists — safe to ignore
+    }
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
