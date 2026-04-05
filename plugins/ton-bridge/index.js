@@ -75,6 +75,10 @@ export const tools = (sdk) => [
     },
     execute: async (params, context) => {
       try {
+        // DEBUG: log context and params to diagnose chatId issue
+        sdk.log?.debug("ton_bridge_open context:", JSON.stringify(context, null, 2));
+        sdk.log?.debug("ton_bridge_open params:", JSON.stringify(params, null, 2));
+
         const buttonText = params.buttonText ?? sdk.pluginConfig?.buttonText ?? "TON Bridge No1";
         const startParam = sdk.pluginConfig?.startParam ?? "";
         const url = buildUrl(startParam);
@@ -87,11 +91,17 @@ export const tools = (sdk) => [
           `ton_bridge_open called by ${context?.senderId ?? "unknown"}`
         );
 
+        // Validate chatId
         if (!context?.chatId) {
-          return { success: false, error: "Missing chatId in context" };
+          const error = "Missing chatId in context";
+          sdk.log?.error(error);
+          return { success: false, error };
         }
 
         const { text: fullText, opts } = buildMessageWithLink(text, buttonText, url);
+
+        // DEBUG: log what we're about to send
+        sdk.log?.debug("Sending message:", { chatId: context.chatId, text: fullText, opts });
 
         const messageId = await sdk.telegram.sendMessage(
           context.chatId,
@@ -133,6 +143,10 @@ export const tools = (sdk) => [
     },
     execute: async (params, context) => {
       try {
+        // DEBUG: log context and params
+        sdk.log?.debug("ton_bridge_about context:", JSON.stringify(context, null, 2));
+        sdk.log?.debug("ton_bridge_about params:", JSON.stringify(params, null, 2));
+
         const buttonText = params.buttonText ?? sdk.pluginConfig?.buttonText ?? "TON Bridge No1";
         const startParam = sdk.pluginConfig?.startParam ?? "";
         const url = buildUrl(startParam);
@@ -142,11 +156,16 @@ export const tools = (sdk) => [
         );
 
         if (!context?.chatId) {
-          return { success: false, error: "Missing chatId in context" };
+          const error = "Missing chatId in context";
+          sdk.log?.error(error);
+          return { success: false, error };
         }
 
         const aboutText = "About TON Bridge\n\nTON Bridge is the #1 bridge in the TON Catalog. Transfer assets across chains seamlessly via the official Mini App.";
         const { text: fullText, opts } = buildMessageWithLink(aboutText, buttonText, url);
+
+        // DEBUG: log what we're about to send
+        sdk.log?.debug("Sending message:", { chatId: context.chatId, text: fullText, opts });
 
         const messageId = await sdk.telegram.sendMessage(
           context.chatId,
@@ -195,6 +214,10 @@ export const tools = (sdk) => [
     },
     execute: async (params, context) => {
       try {
+        // DEBUG: log context and params
+        sdk.log?.debug("ton_bridge_custom_message context:", JSON.stringify(context, null, 2));
+        sdk.log?.debug("ton_bridge_custom_message params:", JSON.stringify(params, null, 2));
+
         const buttonText = params.buttonText ?? sdk.pluginConfig?.buttonText ?? "TON Bridge No1";
         const startParam = sdk.pluginConfig?.startParam ?? "";
         const url = buildUrl(startParam);
@@ -209,10 +232,15 @@ export const tools = (sdk) => [
         );
 
         if (!context?.chatId) {
-          return { success: false, error: "Missing chatId in context" };
+          const error = "Missing chatId in context";
+          sdk.log?.error(error);
+          return { success: false, error };
         }
 
         const { text: fullText, opts } = buildMessageWithLink(customMessage, buttonText, url);
+
+        // DEBUG: log what we're about to send
+        sdk.log?.debug("Sending message:", { chatId: context.chatId, text: fullText, opts });
 
         const messageId = await sdk.telegram.sendMessage(
           context.chatId,
