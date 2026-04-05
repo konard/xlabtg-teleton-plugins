@@ -8,6 +8,17 @@
  * TONCO Protocol: https://tonco.io
  */
 
+// ---------------------------------------------------------------------------
+// Manifest (inline) — required for runtime sdkVersion detection
+// ---------------------------------------------------------------------------
+
+export const manifest = {
+  name: "tonco-dex",
+  version: "1.0.0",
+  sdkVersion: ">=1.0.0",
+  description: "Trade and manage concentrated liquidity positions on TONCO DEX — advanced AMM with multi-asset pools on TON",
+};
+
 import { createRequire } from "node:module";
 import { realpathSync } from "node:fs";
 
@@ -38,6 +49,13 @@ const INDEXER_URL = "https://indexer.tonco.io/graphql";
 
 /** TONCO farming APR API */
 const FARMING_API = "https://api-farming.tonco.io";
+
+/**
+ * Native TON address as used by the TONCO indexer.
+ * The indexer represents native TON as the all-zeros raw address,
+ * NOT as the pTON jetton minter address.
+ */
+const TON_RAW_ADDR = "0:0000000000000000000000000000000000000000000000000000000000000000";
 
 /** Module-level SDK reference (set in tools(sdk) factory) */
 let _sdk = null;
@@ -184,15 +202,6 @@ const toncoListPools = {
       const version = params.version ?? "v1_5";
       const tokenFilter = (params.token ?? "").trim().toLowerCase();
 
-      // Map sort_by to GraphQL orderBy field
-      const orderByMap = {
-        tvl: "totalValueLockedUsd",
-        volume: "volume24HUsd",
-        apr: "apr",
-        fees: "fees24HUsd",
-      };
-      const orderBy = orderByMap[sortBy] ?? "totalValueLockedUsd";
-
       // Build pool where clause
       const where = {
         isInitialized: true,
@@ -223,14 +232,25 @@ const toncoListPools = {
         }
       `;
 
-      // Fetch a larger set to allow client-side token filtering
-      const fetchLimit = tokenFilter ? Math.min(limit * 10, 200) : limit;
+      // Fetch a larger set to allow client-side token filtering and sorting.
+      // NOTE: The TONCO indexer's orderDirection parameter is broken server-side —
+      // passing it causes a Prisma crash. We fetch without orderDirection and sort client-side.
+      const fetchLimit = tokenFilter ? 400 : Math.min(limit * 20, 400);
       const data = await gqlQuery(query, {
         where,
-        filter: { first: fetchLimit, orderBy, orderDirection: "DESC" },
+        filter: { first: fetchLimit },
       });
 
       let pools = data.pools ?? [];
+
+      // Client-side sort descending by the requested metric
+      const sortKey = {
+        tvl: "totalValueLockedUsd",
+        volume: "volume24HUsd",
+        apr: "apr",
+        fees: "fees24HUsd",
+      }[sortBy] ?? "totalValueLockedUsd";
+      pools.sort((a, b) => parseFloat(b[sortKey] ?? "0") - parseFloat(a[sortKey] ?? "0"));
 
       // Apply token filter
       if (tokenFilter) {
@@ -501,9 +521,10 @@ const toncoGetTokenInfo = {
       `;
 
       const where = isAddress ? { address: token } : {};
+      // NOTE: orderDirection is broken server-side; fetch a larger set and sort client-side.
       const data = await gqlQuery(query, {
         where,
-        filter: { first: isAddress ? 1 : limit, orderBy: "totalValueLockedUsd", orderDirection: "DESC" },
+        filter: { first: isAddress ? 1 : 200, orderBy: "totalValueLockedUsd" },
       });
 
       let jettons = data.jettons ?? [];
@@ -516,6 +537,8 @@ const toncoGetTokenInfo = {
             (j.symbol ?? "").toLowerCase().includes(q) ||
             (j.name ?? "").toLowerCase().includes(q)
         );
+        // Sort client-side by TVL descending
+        jettons.sort((a, b) => parseFloat(b.totalValueLockedUsd ?? "0") - parseFloat(a.totalValueLockedUsd ?? "0"));
         if (!jettons.length) {
           // Retry with a broader server-side search isn't available, return not found
           return { success: false, error: `Token not found: ${token}` };
@@ -594,19 +617,20 @@ const toncoSwapQuote = {
         throw new Error("amount_in must be a positive number");
       }
 
-      const pTonAddr = ToncoSDK?.pTON_MINTER?.v1_5 ?? "EQBnGWMCf3-FZZq1W4IWcNiZ0_ms1pwhIr0WNCioB99MkA==";
-
-      // Resolve pool containing the token pair from the indexer
+      // Resolve token addresses.
+      // The TONCO indexer represents native TON as the all-zeros raw address (TON_RAW_ADDR),
+      // NOT as the pTON jetton minter (EQBnGW...). Using the pTON address returns 0 pools.
       const tokenInAddr = params.token_in.trim();
       const tokenOutAddr = params.token_out.trim();
       const isTonIn = tokenInAddr.toUpperCase() === "TON";
       const isTonOut = tokenOutAddr.toUpperCase() === "TON";
 
-      // Resolve pTON address for TON
-      const resolvedInAddr = isTonIn ? pTonAddr : tokenInAddr;
-      const resolvedOutAddr = isTonOut ? pTonAddr : tokenOutAddr;
+      const resolvedInAddr = isTonIn ? TON_RAW_ADDR : tokenInAddr;
+      const resolvedOutAddr = isTonOut ? TON_RAW_ADDR : tokenOutAddr;
 
-      // Fetch pool data for this pair from indexer
+      // Fetch pool data for this pair from indexer.
+      // We query both orderings (jetton0/jetton1 vs jetton1/jetton0) because the indexer
+      // only matches exact assignment order in the pool contract.
       const query = `
         query GetPools($where: PoolWhere) {
           pools(where: $where) {
@@ -633,7 +657,7 @@ const toncoSwapQuote = {
       ]);
 
       const pools = [...(data0.pools ?? []), ...(data1.pools ?? [])];
-      // Filter v1_5 first, then v1
+      // Prefer v1_5, then sort by TVL descending
       const sortedPools = pools.sort((a, b) => {
         if (a.version === "v1_5" && b.version !== "v1_5") return -1;
         if (b.version === "v1_5" && a.version !== "v1_5") return 1;
@@ -802,7 +826,6 @@ const toncoExecuteSwap = {
 
       const {
         Jetton, JettonAmount, Pool, PoolMessageManager, SwapType,
-        pTON_MINTER,
       } = ToncoSDK;
 
       const tokenInAddr = params.token_in.trim();
@@ -810,9 +833,9 @@ const toncoExecuteSwap = {
       const isTonIn = tokenInAddr.toUpperCase() === "TON";
       const isTonOut = tokenOutAddr.toUpperCase() === "TON";
 
-      const pTonAddr = pTON_MINTER?.v1_5 ?? "EQBnGWMCf3-FZZq1W4IWcNiZ0_ms1pwhIr0WNCioB99MkA==";
-      const resolvedInAddr = isTonIn ? pTonAddr : tokenInAddr;
-      const resolvedOutAddr = isTonOut ? pTonAddr : tokenOutAddr;
+      // Use the same TON_RAW_ADDR constant as tonco_swap_quote for consistent address resolution
+      const resolvedInAddr = isTonIn ? TON_RAW_ADDR : tokenInAddr;
+      const resolvedOutAddr = isTonOut ? TON_RAW_ADDR : tokenOutAddr;
 
       // Fetch pool from indexer
       const query = `
@@ -880,8 +903,8 @@ const toncoExecuteSwap = {
       const slippageBasisPoints = BigInt(Math.round(slippagePercent * 100));
       const minOut = rawOut * (10000n - slippageBasisPoints) / 10000n;
 
-      // Get wallet address from SDK
-      const walletAddress = await _sdk.ton.getAddress();
+      // Get wallet address from SDK — getAddress() is synchronous (does not return a Promise)
+      const walletAddress = _sdk.ton.getAddress();
       if (!walletAddress) {
         return { success: false, error: "Agent wallet not initialized. Set up wallet first." };
       }
@@ -1052,12 +1075,16 @@ const toncoGetPositions = {
         ...(params.pool_address ? { pool: params.pool_address.trim() } : {}),
       };
 
+      // NOTE: orderDirection is broken server-side; fetch more and sort client-side.
       const data = await gqlQuery(query, {
         where,
-        filter: { first: limit, orderBy: "creationTime", orderDirection: "DESC" },
+        filter: { first: Math.min(limit * 5, 200), orderBy: "creationTime" },
       });
 
       let positions = data.positions ?? [];
+
+      // Sort by creation time descending client-side
+      positions.sort((a, b) => (b.creationTime ?? 0) - (a.creationTime ?? 0));
 
       // Filter closed positions if not requested
       if (!includeClosed) {
@@ -1065,6 +1092,9 @@ const toncoGetPositions = {
           (p) => p.liquidity && BigInt(p.liquidity) > 0n
         );
       }
+
+      // Apply limit
+      positions = positions.slice(0, limit);
 
       const result = positions.map((p) => {
         const pool = p.pool ?? {};
