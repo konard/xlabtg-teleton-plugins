@@ -11,6 +11,10 @@
  *   - Requires a Composio API key stored in sdk.secrets as "composio_api_key"
  *   - Set COMPOSIO_API_KEY env var or use the secrets store
  *
+ * SDK integration:
+ *   - Uses the official @composio/core npm SDK (installed in plugin-local node_modules)
+ *   - Falls back to direct HTTP calls if the SDK is unavailable
+ *
  * Security:
  *   - API keys and OAuth tokens are never logged
  *   - All requests use HTTPS
@@ -23,13 +27,63 @@
  */
 
 // ---------------------------------------------------------------------------
+// @composio/core SDK — lazy-loaded from plugin-local node_modules.
+// We use a dynamic import so the plugin degrades gracefully if the SDK is
+// not yet installed (first boot before npm ci completes).
+// ---------------------------------------------------------------------------
+
+/** @type {typeof import("@composio/core").Composio | null} */
+let ComposioClass = null;
+let sdkLoadAttempted = false;
+
+/**
+ * Try to load the @composio/core SDK once.
+ * Returns the Composio constructor, or null if unavailable.
+ * @returns {Promise<typeof import("@composio/core").Composio | null>}
+ */
+async function loadComposioSdk() {
+  if (sdkLoadAttempted) return ComposioClass;
+  sdkLoadAttempted = true;
+  try {
+    const mod = await import("@composio/core");
+    ComposioClass = mod.Composio;
+  } catch {
+    // SDK not installed — will fall back to direct HTTP
+    ComposioClass = null;
+  }
+  return ComposioClass;
+}
+
+/**
+ * Cache of Composio SDK instances keyed by API key.
+ * @type {Map<string, import("@composio/core").Composio>}
+ */
+const composioSdkCache = new Map();
+
+/**
+ * Get (or create) a Composio SDK instance for the given API key.
+ * Returns null if the SDK is unavailable.
+ *
+ * @param {string} apiKey
+ * @returns {Promise<import("@composio/core").Composio | null>}
+ */
+async function getComposioSdk(apiKey) {
+  const Cls = await loadComposioSdk();
+  if (!Cls) return null;
+  if (composioSdkCache.has(apiKey)) return composioSdkCache.get(apiKey);
+  const instance = new Cls({ apiKey, allowTracking: false });
+  composioSdkCache.set(apiKey, instance);
+  return instance;
+}
+
+// ---------------------------------------------------------------------------
 // Inline manifest — read by the Teleton runtime for SDK version gating,
 // defaultConfig merging, and secrets registration.
 // ---------------------------------------------------------------------------
 
 export const manifest = {
   name: "composio-direct",
-  version: "1.0.0",
+  version: "1.1.0",
   sdkVersion: ">=1.0.0",
   description:
     "Direct access to 1000+ Composio automation tools — search, execute, batch-run, and authorize services like GitHub, Gmail, Slack, Notion, Jira, Linear without MCP transport",
@@ -125,7 +179,6 @@ async function fetchWithRetry({ url, method, headers, body, timeoutMs, log }) {
       clearTimeout(timer);
 
       const isTimeout = err.name === "AbortError";
-      const isNetwork = !isTimeout;
 
       if (isTimeout) {
         lastError = new Error(`Request timed out after ${timeoutMs}ms`);
@@ -264,7 +317,52 @@ export const tools = (sdk) => {
       const limit = params.limit ?? 50;
       const includeParams = params.include_params ?? false;
 
-      // Build query string
+      // --- Try SDK path first ---
+      const composioSdk = await getComposioSdk(apiKey);
+      if (composioSdk) {
+        sdk.log.debug(`composio_search_tools: using @composio/core SDK`);
+        try {
+          const query = {};
+          if (params.query) query.search = params.query;
+          if (params.toolkit) query.toolkits = [params.toolkit];
+          query.limit = limit;
+
+          const toolList = await composioSdk.tools.getRawComposioTools(query);
+          const items = Array.isArray(toolList?.items) ? toolList.items : [];
+
+          const tools = items.map((item) => {
+            const tool = {
+              name: item.slug ?? item.name ?? item.id,
+              slug: item.slug ?? item.name ?? item.id,
+              description: item.description ?? "",
+              toolkit: item.toolkit?.slug ?? item.toolkit?.name ?? item.appKey ?? item.app ?? "",
+              auth_required: item.requiresAuth ?? item.auth_required ?? false,
+              tags: item.tags ?? [],
+            };
+            if (includeParams) {
+              tool.parameters_schema = item.inputParameters ?? item.parameters ?? item.schema ?? null;
+            }
+            return tool;
+          });
+
+          sdk.log.info(`composio_search_tools: found ${tools.length} tools (SDK)`);
+          return {
+            success: true,
+            data: {
+              tools,
+              count: tools.length,
+              query: params.query ?? null,
+              toolkit: params.toolkit ?? null,
+              total_available: toolList?.total ?? tools.length,
+            },
+          };
+        } catch (err) {
+          sdk.log.debug(`composio_search_tools: SDK error — ${formatApiError(err)}, falling back to HTTP`);
+          // fall through to HTTP path
+        }
+      }
+
+      // --- HTTP fallback path ---
       const qs = new URLSearchParams();
       if (params.query) qs.set("search", params.query);
       if (params.toolkit) qs.set("appName", params.toolkit);
@@ -384,10 +482,64 @@ export const tools = (sdk) => {
         return { success: false, error: "parameters is required and must be an object" };
       }
 
+      sdk.log.debug(`composio_execute_tool: ${params.tool_slug}`);
+
+      // --- Try SDK path first ---
+      const composioSdk = await getComposioSdk(apiKey);
+      if (composioSdk) {
+        sdk.log.debug(`composio_execute_tool: using @composio/core SDK`);
+        try {
+          const execBody = {
+            arguments: params.parameters,
+            dangerouslySkipVersionCheck: true,
+          };
+          if (params.connected_account_id) {
+            execBody.connectedAccountId = params.connected_account_id;
+          }
+          if (context?.chatId) {
+            execBody.userId = String(context.chatId);
+          }
+
+          const result = await composioSdk.tools.execute(
+            params.tool_slug.toUpperCase(),
+            execBody
+          );
+
+          sdk.log.info(`composio_execute_tool: ${params.tool_slug} succeeded (SDK)`);
+          return {
+            success: true,
+            data: result?.data ?? result,
+          };
+        } catch (err) {
+          const errMsg = formatApiError(err);
+          // Detect auth errors from SDK exceptions
+          if (err?.status === 401 || err?.status === 403 ||
+              errMsg.toLowerCase().includes("auth") ||
+              errMsg.toLowerCase().includes("connect") ||
+              errMsg.toLowerCase().includes("not connected")) {
+            const service = extractServiceFromSlug(params.tool_slug);
+            const connectUrl = buildConnectUrl(baseUrl, apiKey, service, context);
+            sdk.log.info(`composio_execute_tool: auth required for ${service} (SDK)`);
+            return {
+              success: false,
+              error: "auth_required",
+              auth: {
+                service,
+                connect_url: connectUrl,
+                message: `Authorization required for ${service.toUpperCase()}. Click the link to connect.`,
+              },
+            };
+          }
+          sdk.log.debug(`composio_execute_tool: SDK error — ${errMsg}, falling back to HTTP`);
+          // fall through to HTTP path
+        }
+      }
+
+      // --- HTTP fallback path ---
       const effectiveTimeout = params.timeout_override_ms ?? timeoutMs;
       const url = `${baseUrl}/actions/${encodeURIComponent(params.tool_slug)}/execute`;
 
-      sdk.log.debug(`composio_execute_tool: POST ${params.tool_slug} (timeout=${effectiveTimeout}ms)`);
+      sdk.log.debug(`composio_execute_tool: POST ${params.tool_slug} via HTTP (timeout=${effectiveTimeout}ms)`);
 
       const body = {
         input: params.parameters,
@@ -547,6 +699,8 @@ export const tools = (sdk) => {
         const batchEnd = Math.min(batchStart + maxParallel, params.executions.length);
         const batch = params.executions.slice(batchStart, batchEnd);
 
+        const composioSdk = await getComposioSdk(apiKey);
+
         const batchPromises = batch.map(async (exec, batchIdx) => {
           const globalIdx = batchStart + batchIdx;
           if (stopped) {
@@ -554,6 +708,57 @@ export const tools = (sdk) => {
             return;
           }
 
+          // --- Try SDK path first ---
+          if (composioSdk) {
+            try {
+              const execBody = {
+                arguments: exec.parameters,
+                dangerouslySkipVersionCheck: true,
+              };
+              if (context?.chatId) {
+                execBody.userId = String(context.chatId);
+              }
+
+              const result = await composioSdk.tools.execute(
+                exec.tool_slug.toUpperCase(),
+                execBody
+              );
+
+              results[globalIdx] = {
+                tool_slug: exec.tool_slug,
+                success: true,
+                data: result?.data ?? result,
+              };
+              return;
+            } catch (err) {
+              const errMsg = formatApiError(err);
+              const isAuthErr = err?.status === 401 || err?.status === 403 ||
+                errMsg.toLowerCase().includes("auth") ||
+                errMsg.toLowerCase().includes("connect") ||
+                errMsg.toLowerCase().includes("not connected");
+
+              if (isAuthErr) {
+                const service = extractServiceFromSlug(exec.tool_slug);
+                const connectUrl = buildConnectUrl(baseUrl, apiKey, service, context);
+                results[globalIdx] = {
+                  tool_slug: exec.tool_slug,
+                  success: false,
+                  error: "auth_required",
+                  auth: {
+                    service,
+                    connect_url: connectUrl,
+                    message: `Authorization required for ${service.toUpperCase()}.`,
+                  },
+                };
+                if (failFast) stopped = true;
+                return;
+              }
+              sdk.log.debug(`composio_multi_execute: SDK error for ${exec.tool_slug} — ${errMsg}, falling back to HTTP`);
+              // fall through to HTTP path
+            }
+          }
+
+          // --- HTTP fallback path ---
           const effectiveTimeout = exec.timeout_override_ms ?? timeoutMs;
           const url = `${baseUrl}/actions/${encodeURIComponent(exec.tool_slug)}/execute`;
 

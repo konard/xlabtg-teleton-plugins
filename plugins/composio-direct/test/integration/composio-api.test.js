@@ -17,8 +17,16 @@ import assert from "node:assert/strict";
 // ---------------------------------------------------------------------------
 
 function makeSdk({ apiKey = "test-key", config = {} } = {}) {
+  const secretsStore = apiKey ? { composio_api_key: apiKey } : {};
   return {
-    secrets: { composio_api_key: apiKey },
+    secrets: {
+      get: (key) => secretsStore[key] ?? undefined,
+      has: (key) => key in secretsStore,
+      require: (key) => {
+        if (!(key in secretsStore)) throw new Error(`SECRET_NOT_FOUND: ${key}`);
+        return secretsStore[key];
+      },
+    },
     config: {
       base_url: "https://api.composio.dev/api/v1",
       timeout_ms: 3000,
@@ -243,8 +251,7 @@ describe("multi-execute batching", () => {
 
 describe("missing API key", () => {
   it("all tools return a helpful error when composio_api_key is not set", async () => {
-    const sdk = makeSdk();
-    sdk.secrets = {};
+    const sdk = makeSdk({ apiKey: null });
 
     const toolList = toolsFactory(sdk);
     const context = makeContext();
