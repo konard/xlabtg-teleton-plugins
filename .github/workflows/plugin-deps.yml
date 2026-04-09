@@ -66,6 +66,9 @@ jobs:
               exit_code=1
               continue
             fi
-            npm audit --prefix "$dir" || echo "::warning file=$pkg::Audit issues in plugin '$name'"
+            if ! npm audit --audit-level=high --prefix "$dir"; then
+              echo "::error file=$pkg::High or critical vulnerabilities found in '$name'"
+              exit_code=1
+            fi
           done
           exit $exit_code
