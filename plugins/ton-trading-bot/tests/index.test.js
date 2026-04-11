@@ -150,10 +150,10 @@ describe("ton-trading-bot plugin", () => {
       assert.ok(Array.isArray(toolList));
     });
 
-    it("exports exactly 24 tools", () => {
+    it("exports exactly 38 tools", () => {
       const sdk = makeSdk();
       const toolList = mod.tools(sdk);
-      assert.equal(toolList.length, 24);
+      assert.equal(toolList.length, 38);
     });
 
     it("all tools have name, description, and execute", () => {
@@ -1856,6 +1856,414 @@ describe("ton-trading-bot plugin", () => {
     it("required parameters include amount", () => {
       const sdk = makeSdk();
       const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_simulation_balance");
+      assert.ok(tool.parameters?.required?.includes("amount"));
+    });
+  });
+
+  // ── ton_trading_set_take_profit ─────────────────────────────────────────────
+  describe("ton_trading_set_take_profit", () => {
+    it("registers a take-profit rule for an open trade", async () => {
+      const sdk = makeSdk({
+        dbRows: { trade: { id: 1, status: "open" }, lastInsertRowid: 5 },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_take_profit");
+      const result = await tool.execute(
+        { trade_id: 1, entry_price: 1.5, take_profit_percent: 10 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.trade_id, 1);
+      assert.equal(result.data.take_profit_percent, 10);
+      assert.ok(result.data.take_profit_price > 1.5);
+      assert.equal(result.data.trailing_stop, false);
+    });
+
+    it("supports trailing stop option", async () => {
+      const sdk = makeSdk({
+        dbRows: { trade: { id: 2, status: "open" }, lastInsertRowid: 6 },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_take_profit");
+      const result = await tool.execute(
+        { trade_id: 2, entry_price: 2.0, take_profit_percent: 15, trailing_stop: true, trailing_stop_percent: 5 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.trailing_stop, true);
+      assert.equal(result.data.trailing_stop_percent, 5);
+    });
+
+    it("fails when trade is not found", async () => {
+      const sdk = makeSdk({ dbRows: { trade: null } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_take_profit");
+      const result = await tool.execute(
+        { trade_id: 99, entry_price: 1.0, take_profit_percent: 10 },
+        makeContext()
+      );
+      assert.equal(result.success, false);
+      assert.ok(result.error.includes("not found"));
+    });
+
+    it("fails when trade is already closed", async () => {
+      const sdk = makeSdk({ dbRows: { trade: { id: 3, status: "closed" } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_take_profit");
+      const result = await tool.execute(
+        { trade_id: 3, entry_price: 1.0, take_profit_percent: 10 },
+        makeContext()
+      );
+      assert.equal(result.success, false);
+      assert.ok(result.error.includes("already closed"));
+    });
+
+    it("required parameters include trade_id, entry_price, take_profit_percent", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_set_take_profit");
+      assert.ok(tool.parameters?.required?.includes("trade_id"));
+      assert.ok(tool.parameters?.required?.includes("entry_price"));
+      assert.ok(tool.parameters?.required?.includes("take_profit_percent"));
+    });
+  });
+
+  // ── ton_trading_auto_execute ────────────────────────────────────────────────
+  describe("ton_trading_auto_execute", () => {
+    it("executes simulation trade when no trigger conditions set", async () => {
+      const sdk = makeSdk({ dbRows: { lastInsertRowid: 10, simBalance: { balance: 500 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_auto_execute");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: 5, mode: "simulation" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.executed, true);
+    });
+
+    it("does not execute when price trigger not met (price_above)", async () => {
+      const sdk = makeSdk({ dbRows: { simBalance: { balance: 500 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_auto_execute");
+      // TON price from mock is 3.5 USD; trigger_price_above = 100
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: 5, mode: "simulation", trigger_price_above: 100 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.executed, false);
+      assert.ok(result.data.conditions.length > 0);
+    });
+
+    it("executes trade when price_below trigger is met", async () => {
+      const sdk = makeSdk({ dbRows: { lastInsertRowid: 11, simBalance: { balance: 500 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_auto_execute");
+      // TON price from mock is 3.5 USD; trigger_price_below = 1000
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: 5, mode: "simulation", trigger_price_below: 1000 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.executed, true);
+    });
+  });
+
+  // ── ton_trading_get_portfolio_summary ──────────────────────────────────────
+  describe("ton_trading_get_portfolio_summary", () => {
+    it("returns summary with open and closed trade counts", async () => {
+      const sdk = makeSdk({
+        dbRows: { trades: [], simBalance: { balance: 800 } },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_portfolio_summary");
+      const result = await tool.execute({}, makeContext());
+      assert.equal(result.success, true);
+      assert.ok("open_positions" in result.data);
+      assert.ok("realized_pnl_usd" in result.data);
+      assert.ok("simulation_balance_ton" in result.data);
+    });
+
+    it("accepts mode parameter", async () => {
+      const sdk = makeSdk({ dbRows: { trades: [], simBalance: { balance: 800 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_portfolio_summary");
+      const result = await tool.execute({ mode: "simulation" }, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.mode, "simulation");
+    });
+  });
+
+  // ── ton_trading_rebalance_portfolio ────────────────────────────────────────
+  describe("ton_trading_rebalance_portfolio", () => {
+    it("returns rebalancing plan for valid target allocations", async () => {
+      const sdk = makeSdk({ dbRows: { simBalance: { balance: 100 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_rebalance_portfolio");
+      const result = await tool.execute(
+        { target_allocations: [{ asset: "TON", percent: 100 }], mode: "simulation" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok("rebalancing_plan" in result.data);
+      assert.equal(result.data.rebalancing_plan.length, 1);
+    });
+
+    it("fails when allocations do not sum to 100", async () => {
+      const sdk = makeSdk({ dbRows: { simBalance: { balance: 100 } } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_rebalance_portfolio");
+      const result = await tool.execute(
+        { target_allocations: [{ asset: "TON", percent: 60 }, { asset: "EQCxE6test", percent: 20 }] },
+        makeContext()
+      );
+      assert.equal(result.success, false);
+      assert.ok(result.error.includes("sum to 100"));
+    });
+
+    it("required parameters include target_allocations", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_rebalance_portfolio");
+      assert.ok(tool.parameters?.required?.includes("target_allocations"));
+    });
+  });
+
+  // ── ton_trading_get_order_book_depth ───────────────────────────────────────
+  describe("ton_trading_get_order_book_depth", () => {
+    it("returns depth levels and liquidity rating", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_order_book_depth");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok(Array.isArray(result.data.depth_levels));
+      assert.ok("from_asset" in result.data);
+    });
+
+    it("returns custom trade impact when trade_amount provided", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_order_book_depth");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", trade_amount: 10 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok("custom_trade_impact" in result.data);
+    });
+
+    it("required parameters include from_asset and to_asset", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_order_book_depth");
+      assert.ok(tool.parameters?.required?.includes("from_asset"));
+      assert.ok(tool.parameters?.required?.includes("to_asset"));
+    });
+  });
+
+  // ── ton_trading_create_schedule ────────────────────────────────────────────
+  describe("ton_trading_create_schedule", () => {
+    it("creates DCA schedule with correct number of orders", async () => {
+      const sdk = makeSdk({ dbRows: { lastInsertRowid: 1 } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_create_schedule");
+      const result = await tool.execute(
+        {
+          strategy: "dca",
+          from_asset: "TON",
+          to_asset: "EQCxE6test",
+          amount_per_trade: 10,
+          mode: "simulation",
+          interval_hours: 24,
+          num_orders: 3,
+        },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.strategy, "dca");
+      assert.equal(result.data.num_orders_created, 3);
+      assert.equal(result.data.total_amount, 30);
+    });
+
+    it("required parameters include strategy, from_asset, to_asset, amount_per_trade", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_create_schedule");
+      const required = tool.parameters?.required ?? [];
+      assert.ok(required.includes("strategy"));
+      assert.ok(required.includes("from_asset"));
+      assert.ok(required.includes("to_asset"));
+      assert.ok(required.includes("amount_per_trade"));
+    });
+  });
+
+  // ── ton_trading_cancel_schedule ────────────────────────────────────────────
+  describe("ton_trading_cancel_schedule", () => {
+    it("cancels a single scheduled trade by ID", async () => {
+      let updatedId = null;
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: (sql) => ({
+            get: () => ({ id: 5, status: "pending" }),
+            all: () => [],
+            run: (...args) => {
+              if (sql.includes("UPDATE")) updatedId = args[0];
+              return { changes: 1 };
+            },
+          }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_cancel_schedule");
+      const result = await tool.execute({ schedule_id: 5 }, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.cancelled_count, 1);
+    });
+
+    it("fails when schedule not found", async () => {
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: () => ({ get: () => null, all: () => [], run: () => ({ changes: 0 }) }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_cancel_schedule");
+      const result = await tool.execute({ schedule_id: 99 }, makeContext());
+      assert.equal(result.success, false);
+      assert.ok(result.error.includes("not found"));
+    });
+
+    it("fails when neither schedule_id nor asset provided", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_cancel_schedule");
+      const result = await tool.execute({}, makeContext());
+      assert.equal(result.success, false);
+    });
+  });
+
+  // ── ton_trading_get_performance_dashboard ──────────────────────────────────
+  describe("ton_trading_get_performance_dashboard", () => {
+    it("returns performance metrics for closed trades", async () => {
+      const closedTrades = [
+        { id: 1, pnl: 10, pnl_percent: 5, timestamp: Date.now() - 1000 },
+        { id: 2, pnl: -3, pnl_percent: -2, timestamp: Date.now() - 2000 },
+        { id: 3, pnl: 7, pnl_percent: 3, timestamp: Date.now() - 3000 },
+      ];
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: (sql) => ({
+            get: () => ({ count: 2 }),
+            all: () => sql.includes("status = 'closed'") ? closedTrades : [],
+            run: () => ({ lastInsertRowid: 1, changes: 0 }),
+          }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_performance_dashboard");
+      const result = await tool.execute({ mode: "all", days: 30 }, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.total_trades, 3);
+      assert.ok("win_rate" in result.data);
+      assert.ok("total_pnl_usd" in result.data);
+      assert.ok("profit_factor" in result.data);
+    });
+
+    it("returns empty stats note when no trades in period", async () => {
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: () => ({
+            get: () => ({ count: 0 }),
+            all: () => [],
+            run: () => ({ lastInsertRowid: 1, changes: 0 }),
+          }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_performance_dashboard");
+      const result = await tool.execute({}, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.total_trades, 0);
+    });
+  });
+
+  // ── ton_trading_export_trades ──────────────────────────────────────────────
+  describe("ton_trading_export_trades", () => {
+    it("returns all trades by default", async () => {
+      const mockTrades = [
+        { id: 1, mode: "simulation", status: "closed", pnl: 5 },
+        { id: 2, mode: "real", status: "open", pnl: null },
+      ];
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: () => ({ get: () => null, all: () => mockTrades, run: () => ({ lastInsertRowid: 1 }) }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_export_trades");
+      const result = await tool.execute({}, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.total_records, 2);
+      assert.ok(Array.isArray(result.data.trades));
+    });
+
+    it("respects mode filter", async () => {
+      const sdk = makeSdk({ dbRows: { trades: [] } });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_export_trades");
+      const result = await tool.execute({ mode: "simulation" }, makeContext());
+      assert.equal(result.success, true);
+      assert.equal(result.data.filters.mode, "simulation");
+    });
+  });
+
+  // ── ton_trading_get_best_price ─────────────────────────────────────────────
+  describe("ton_trading_get_best_price", () => {
+    it("returns ranked dex comparison and best dex", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_best_price");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: "1" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok(result.data.best_dex);
+      assert.ok(Array.isArray(result.data.dex_comparison));
+      assert.ok(result.data.dex_comparison.length >= 2);
+    });
+
+    it("caches result in sdk.storage", async () => {
+      let cachedKey = null;
+      const sdk = makeSdk({
+        storage: {
+          set: (key) => { cachedKey = key; },
+          get: () => undefined,
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_best_price");
+      await tool.execute({ from_asset: "TON", to_asset: "EQCxE6test", amount: "1" }, makeContext());
+      assert.ok(cachedKey, "should cache result");
+    });
+
+    it("required parameters include from_asset, to_asset, amount", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_best_price");
+      assert.ok(tool.parameters?.required?.includes("from_asset"));
+      assert.ok(tool.parameters?.required?.includes("to_asset"));
+      assert.ok(tool.parameters?.required?.includes("amount"));
+    });
+  });
+
+  // ── ton_trading_cross_dex_routing ──────────────────────────────────────────
+  describe("ton_trading_cross_dex_routing", () => {
+    it("returns best route for a swap", async () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_cross_dex_routing");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: 10 },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.ok("best_route" in result.data);
+      assert.ok(result.data.best_route.type === "single" || result.data.best_route.type === "split");
+      assert.ok(Array.isArray(result.data.best_route.splits));
+    });
+
+    it("required parameters include from_asset, to_asset, amount", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_cross_dex_routing");
+      assert.ok(tool.parameters?.required?.includes("from_asset"));
+      assert.ok(tool.parameters?.required?.includes("to_asset"));
       assert.ok(tool.parameters?.required?.includes("amount"));
     });
   });

@@ -1,7 +1,7 @@
 {
   "id": "ton-trading-bot",
   "name": "TON Trading Bot",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, risk management, and automation.",
   "author": {
     "name": "xlabtg",
@@ -107,6 +107,62 @@
     {
       "name": "ton_trading_set_simulation_balance",
       "description": "Manually set the simulation balance to a specific amount to align with real portfolio"
+    },
+    {
+      "name": "ton_trading_set_take_profit",
+      "description": "Register a standalone take-profit rule for an open trade with optional trailing stop"
+    },
+    {
+      "name": "ton_trading_auto_execute",
+      "description": "Automatically execute trades when trigger conditions (price targets) are met"
+    },
+    {
+      "name": "ton_trading_get_portfolio_summary",
+      "description": "Get a comprehensive portfolio overview with unrealized P&L and performance metrics"
+    },
+    {
+      "name": "ton_trading_rebalance_portfolio",
+      "description": "Calculate trades needed to rebalance portfolio to target allocations"
+    },
+    {
+      "name": "ton_trading_get_technical_indicators",
+      "description": "Calculate RSI, MACD, and Bollinger Bands for a TON token pair"
+    },
+    {
+      "name": "ton_trading_get_order_book_depth",
+      "description": "Analyse order book depth, liquidity, and price impact for a token pair"
+    },
+    {
+      "name": "ton_trading_create_schedule",
+      "description": "Create a recurring trading schedule for DCA or grid strategies"
+    },
+    {
+      "name": "ton_trading_cancel_schedule",
+      "description": "Cancel one or more scheduled (pending) trades"
+    },
+    {
+      "name": "ton_trading_get_performance_dashboard",
+      "description": "Get real-time performance metrics: P&L, win rate, best/worst trades, daily breakdown"
+    },
+    {
+      "name": "ton_trading_export_trades",
+      "description": "Export trade history in structured format for external analysis"
+    },
+    {
+      "name": "ton_trading_dynamic_stop_loss",
+      "description": "Calculate and register a volatility-adjusted stop-loss using ATR"
+    },
+    {
+      "name": "ton_trading_position_sizing",
+      "description": "Calculate optimal position size based on portfolio volatility and conviction level"
+    },
+    {
+      "name": "ton_trading_cross_dex_routing",
+      "description": "Find optimal execution path across multiple DEXes including split routing"
+    },
+    {
+      "name": "ton_trading_get_best_price",
+      "description": "Compare prices across STON.fi, DeDust, and TONCO to find best execution price"
     }
   ],
   "defaultConfig": {
