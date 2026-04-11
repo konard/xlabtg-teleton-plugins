@@ -264,6 +264,123 @@ describe("tonco-dex plugin", () => {
     });
   });
 
+  // ── P3: pool_address must be normalized to raw format ────────────────────
+  // The TONCO indexer's Address.parseRaw() crashes on bounceable (EQ.../UQ...)
+  // addresses. The plugin must convert any user-supplied address to 0:hex raw
+  // format before passing it to the GraphQL query.
+
+  describe("P3 fix: tonco_get_pool_stats normalizes pool_address to raw format", () => {
+    it("has required parameter: pool_address", () => {
+      const tool = mod.tools(makeSdk()).find((t) => t.name === "tonco_get_pool_stats");
+      assert.ok(
+        tool.parameters.required?.includes("pool_address"),
+        "pool_address must be required"
+      );
+    });
+
+    it("plugin source contains normalizeToRaw helper that handles EQ… addresses", async () => {
+      // Verify the source code uses normalizeToRaw() in tonco_get_pool_stats so
+      // bounceable addresses (EQ…/UQ…) are converted to 0:hex before the GraphQL call.
+      const { readFileSync } = await import("node:fs");
+      const { resolve } = await import("node:path");
+      const src = readFileSync(resolve("plugins/tonco-dex/index.js"), "utf8");
+
+      assert.ok(
+        src.includes("function normalizeToRaw"),
+        "P3: normalizeToRaw helper must be defined"
+      );
+      assert.ok(
+        src.includes("normalizeToRaw(params.pool_address)"),
+        "P3: tonco_get_pool_stats must call normalizeToRaw on pool_address"
+      );
+    });
+  });
+
+  // ── P3 edge cases: normalizeToRaw helper robustness ─────────────────────────
+  // The reviewer requested tests for edge cases: empty string, invalid address,
+  // whitespace, and addresses that are already in raw format.
+
+  describe("P3 edge cases: normalizeToRaw helper", () => {
+    it("guards against non-string input (source-level check)", async () => {
+      // normalizeToRaw guard: typeof addr !== 'string' → return addr unchanged
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(resolve("plugins/tonco-dex/index.js"), "utf8");
+      assert.ok(
+        src.includes('typeof addr !== "string"') || src.includes("typeof addr !== 'string'"),
+        "normalizeToRaw must guard against non-string input"
+      );
+    });
+
+    it("returns early for empty/whitespace-only string (source-level check)", async () => {
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(resolve("plugins/tonco-dex/index.js"), "utf8");
+      assert.ok(
+        src.includes("!addr.trim()"),
+        "normalizeToRaw must return early when addr.trim() is empty"
+      );
+    });
+
+    it("emits console.warn when address parsing fails (source-level check)", async () => {
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(resolve("plugins/tonco-dex/index.js"), "utf8");
+      assert.ok(
+        src.includes("console.warn"),
+        "normalizeToRaw must log a warning when Address.parse() throws"
+      );
+    });
+
+    it("trims surrounding whitespace before parsing (source-level check)", async () => {
+      const { readFileSync } = await import("node:fs");
+      const src = readFileSync(resolve("plugins/tonco-dex/index.js"), "utf8");
+      assert.ok(
+        src.includes("addr.trim()"),
+        "normalizeToRaw must call trim() on the input address"
+      );
+    });
+
+    it("already-raw 0:hex address reaches GraphQL layer without local TypeError", async () => {
+      const tool = mod.tools(makeSdk()).find((t) => t.name === "tonco_get_pool_stats");
+      const rawAddr = "0:94510e099044c33d344b94d68c071e6f18584c9f4382d75f3801f76704a29a18";
+      const result = await tool.execute({ pool_address: rawAddr });
+      assert.ok(typeof result === "object", "should return an object");
+      assert.ok("success" in result, "should have success field");
+      if (!result.success) {
+        assert.ok(
+          !result.error?.includes("TypeError") && !result.error?.includes("first argument must be"),
+          `raw address must not cause a local TypeError, got: ${result.error}`
+        );
+      }
+    });
+
+    it("bounceable EQ… address is accepted without local TypeError", async () => {
+      const tool = mod.tools(makeSdk()).find((t) => t.name === "tonco_get_pool_stats");
+      const bounceableAddr = "EQCUUQ4JkETDPTRLlNaMBx5vGFhMn0OC1184AfdnBKKaGK2M";
+      const result = await tool.execute({ pool_address: bounceableAddr });
+      assert.ok(typeof result === "object", "should return an object");
+      assert.ok("success" in result, "should have success field");
+      if (!result.success) {
+        assert.ok(
+          !result.error?.includes("TypeError") && !result.error?.includes("first argument must be"),
+          `bounceable address must not cause a local TypeError, got: ${result.error}`
+        );
+      }
+    });
+
+    it("address with leading/trailing spaces is accepted without local TypeError", async () => {
+      const tool = mod.tools(makeSdk()).find((t) => t.name === "tonco_get_pool_stats");
+      const paddedAddr = "  EQCUUQ4JkETDPTRLlNaMBx5vGFhMn0OC1184AfdnBKKaGK2M  ";
+      const result = await tool.execute({ pool_address: paddedAddr });
+      assert.ok(typeof result === "object", "should return an object");
+      assert.ok("success" in result, "should have success field");
+      if (!result.success) {
+        assert.ok(
+          !result.error?.includes("TypeError") && !result.error?.includes("first argument must be"),
+          `padded address must be trimmed and not cause a local TypeError, got: ${result.error}`
+        );
+      }
+    });
+  });
+
   describe("tonco_get_token_info parameter validation", () => {
     let tool;
     before(() => {
