@@ -76,11 +76,12 @@ let _sdk = null;
  *                   if parsing fails (the indexer will then return its own error)
  */
 function normalizeToRaw(addr) {
-  if (!addr) return addr;
+  if (typeof addr !== "string" || !addr.trim()) return addr;
   try {
     const parsed = Address.parse(addr.trim());
     return `0:${parsed.hash.toString("hex")}`;
-  } catch {
+  } catch (e) {
+    console.warn(`[tonco-dex] normalizeToRaw: failed to parse address "${addr}", using as-is:`, e.message);
     return addr.trim();
   }
 }
