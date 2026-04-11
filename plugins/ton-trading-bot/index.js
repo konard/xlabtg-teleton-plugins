@@ -39,6 +39,34 @@
  *   - ton_trading_reset_simulation_balance    — reset virtual balance to starting amount
  *   - ton_trading_set_simulation_balance      — manually set the virtual balance
  *
+ * Take-profit automation (issue #135):
+ *   - ton_trading_set_take_profit             — register standalone take-profit with optional trailing stop
+ *   - ton_trading_auto_execute                — conditionally execute trades when price triggers are met
+ *
+ * Portfolio-level management (issue #135):
+ *   - ton_trading_get_portfolio_summary       — comprehensive portfolio overview with unrealized P&L
+ *   - ton_trading_rebalance_portfolio         — calculate rebalancing trades for target allocations
+ *
+ * Advanced market data (issue #135):
+ *   - ton_trading_get_technical_indicators    — RSI, MACD, Bollinger Bands for TON/jettons
+ *   - ton_trading_get_order_book_depth        — liquidity analysis and price impact assessment
+ *
+ * Scheduled trading features (issue #135):
+ *   - ton_trading_create_schedule             — create recurring DCA or grid trading schedules
+ *   - ton_trading_cancel_schedule             — cancel pending scheduled trades
+ *
+ * Performance analytics (issue #135):
+ *   - ton_trading_get_performance_dashboard   — real-time P&L, win rate, trade breakdown
+ *   - ton_trading_export_trades               — export trade history for external analysis
+ *
+ * Risk management enhancement (issue #135):
+ *   - ton_trading_dynamic_stop_loss           — volatility-adjusted stop-loss using ATR
+ *   - ton_trading_position_sizing             — optimal position size based on volatility and conviction
+ *
+ * Multi-DEX coordination (issue #135):
+ *   - ton_trading_cross_dex_routing           — optimal split routing across multiple DEXes
+ *   - ton_trading_get_best_price              — compare prices across STON.fi, DeDust, TONCO
+ *
  * Pattern B (SDK) — uses sdk.ton, sdk.ton.dex, sdk.db, sdk.storage, sdk.log
  *
  * Architecture: each tool is atomic. The LLM composes them into a strategy.
@@ -47,7 +75,7 @@
 
 export const manifest = {
   name: "ton-trading-bot",
-  version: "2.0.0",
+  version: "2.1.0",
   sdkVersion: ">=1.0.0",
   description: "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, risk management, and automation. The LLM composes these into trading strategies.",
   defaultConfig: {
@@ -96,7 +124,10 @@ export function migrate(db) {
       take_profit_percent REAL,          -- optional take-profit level
       entry_price REAL NOT NULL,
       created_at INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active'  -- 'active' | 'triggered' | 'cancelled'
+      status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'triggered' | 'cancelled'
+      trailing_stop INTEGER NOT NULL DEFAULT 0,        -- 1 if trailing stop is active
+      trailing_stop_percent REAL,                      -- trailing offset below peak price
+      peak_price REAL                                  -- highest price seen (for trailing stop)
     );
 
     -- Scheduled trades: pending orders for future execution
@@ -118,6 +149,9 @@ export function migrate(db) {
   const alterColumns = [
     "ALTER TABLE trade_journal ADD COLUMN entry_price_usd REAL",
     "ALTER TABLE trade_journal ADD COLUMN exit_price_usd REAL",
+    "ALTER TABLE stop_loss_rules ADD COLUMN trailing_stop INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE stop_loss_rules ADD COLUMN trailing_stop_percent REAL",
+    "ALTER TABLE stop_loss_rules ADD COLUMN peak_price REAL",
   ];
   for (const sql of alterColumns) {
     try {
@@ -1837,13 +1871,37 @@ export const tools = (sdk) => [
         const safe = [];
 
         for (const rule of activeRules) {
-          const stopLossPrice = rule.entry_price * (1 - rule.stop_loss_percent / 100);
+          // For trailing stops: update peak_price if price moved higher, then compute stop from peak
+          let effectivePeak = rule.peak_price ?? rule.entry_price;
+          let trailingStopPrice = null;
+          if (rule.trailing_stop && rule.trailing_stop_percent != null) {
+            if (current_price > effectivePeak) {
+              effectivePeak = current_price;
+              sdk.db
+                .prepare("UPDATE stop_loss_rules SET peak_price = ? WHERE id = ?")
+                .run(effectivePeak, rule.id);
+            }
+            trailingStopPrice = effectivePeak * (1 - rule.trailing_stop_percent / 100);
+          }
+
+          // The plain stop-loss level is always based on entry price, regardless of trailing.
+          const plainStopLossPrice = rule.entry_price * (1 - rule.stop_loss_percent / 100);
           const takeProfitPrice = rule.take_profit_percent != null
             ? rule.entry_price * (1 + rule.take_profit_percent / 100)
             : null;
 
-          const stopLossHit = current_price <= stopLossPrice;
-          const takeProfitHit = takeProfitPrice != null && current_price >= takeProfitPrice;
+          // When trailing stop is active the effective stop price is the trailing floor
+          // (used for the annotated stop_loss_price field), but the exit is classified as
+          // "take_profit" because the trade is being closed to lock in profits, not a loss.
+          const stopLossPrice = trailingStopPrice ?? plainStopLossPrice;
+
+          // Plain stop-loss fires only when price drops below the entry-based floor.
+          const stopLossHit = current_price <= plainStopLossPrice;
+          // For trailing stops: take_profit fires when price pulls back below the trailing floor.
+          // For plain rules:    take_profit fires when price reaches the static target.
+          const takeProfitHit = rule.trailing_stop
+            ? trailingStopPrice != null && current_price <= trailingStopPrice && !stopLossHit
+            : takeProfitPrice != null && current_price >= takeProfitPrice;
 
           const annotated = {
             rule_id: rule.id,
@@ -1856,6 +1914,9 @@ export const tools = (sdk) => [
             take_profit_percent: rule.take_profit_percent ?? null,
             stop_loss_hit: stopLossHit,
             take_profit_hit: takeProfitHit,
+            trailing_stop: rule.trailing_stop === 1,
+            trailing_stop_percent: rule.trailing_stop_percent ?? null,
+            peak_price: rule.trailing_stop === 1 ? parseFloat(effectivePeak.toFixed(6)) : null,
           };
 
           if (stopLossHit || takeProfitHit) {
@@ -2198,6 +2259,1616 @@ export const tools = (sdk) => [
         };
       } catch (err) {
         sdk.log.error(`ton_trading_set_simulation_balance failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Take-Profit Automation ─────────────────────────────────────────────────
+
+  // ── Tool 25: ton_trading_set_take_profit ───────────────────────────────────
+  {
+    name: "ton_trading_set_take_profit",
+    description:
+      "Register a standalone take-profit rule for an open trade. When the market price reaches the take-profit level, the LLM should close the position using ton_trading_record_trade. Supports optional trailing stop that locks in profits as price rises.",
+    category: "action",
+    parameters: {
+      type: "object",
+      properties: {
+        trade_id: {
+          type: "integer",
+          description: "Journal trade ID to protect with a take-profit rule",
+        },
+        entry_price: {
+          type: "number",
+          description: "Price at which the position was opened (in quote asset units)",
+        },
+        take_profit_percent: {
+          type: "number",
+          description: "Profit percentage that triggers the take-profit exit (e.g. 10 = close at +10%)",
+          minimum: 0.1,
+        },
+        trailing_stop: {
+          type: "boolean",
+          description: "Enable trailing stop — the take-profit level adjusts upward as price rises, locking in profits. Defaults to false.",
+        },
+        trailing_stop_percent: {
+          type: "number",
+          description: "Trailing stop offset below the peak price in percent. Only used when trailing_stop is true. Defaults to take_profit_percent / 2.",
+          minimum: 0.1,
+        },
+      },
+      required: ["trade_id", "entry_price", "take_profit_percent"],
+    },
+    execute: async (params, _context) => {
+      const { trade_id, entry_price, take_profit_percent, trailing_stop = false, trailing_stop_percent } = params;
+      try {
+        const entry = sdk.db
+          .prepare("SELECT id, status FROM trade_journal WHERE id = ?")
+          .get(trade_id);
+
+        if (!entry) {
+          return { success: false, error: `Trade ${trade_id} not found` };
+        }
+        if (entry.status === "closed") {
+          return { success: false, error: `Trade ${trade_id} is already closed` };
+        }
+
+        // Use a very large stop-loss (99%) to create a take-profit-only rule via the existing table
+        const trailingOffset = trailing_stop_percent ?? take_profit_percent / 2;
+        const ruleId = sdk.db
+          .prepare(
+            `INSERT INTO stop_loss_rules
+               (trade_id, stop_loss_percent, take_profit_percent, entry_price, created_at,
+                trailing_stop, trailing_stop_percent, peak_price)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            trade_id, 99, take_profit_percent, entry_price, Date.now(),
+            trailing_stop ? 1 : 0,
+            trailing_stop ? trailingOffset : null,
+            trailing_stop ? entry_price : null
+          )
+          .lastInsertRowid;
+
+        const takeProfitPrice = entry_price * (1 + take_profit_percent / 100);
+
+        sdk.log.info(
+          `Take-profit rule #${ruleId} set for trade #${trade_id}: TP=${takeProfitPrice.toFixed(4)}` +
+          (trailing_stop ? ` (trailing stop: ${trailingOffset}%)` : "")
+        );
+
+        return {
+          success: true,
+          data: {
+            rule_id: ruleId,
+            trade_id,
+            entry_price,
+            take_profit_price: parseFloat(takeProfitPrice.toFixed(6)),
+            take_profit_percent,
+            trailing_stop,
+            trailing_stop_percent: trailing_stop ? trailingOffset : null,
+            status: "active",
+            note: trailing_stop
+              ? `Trailing stop active — take-profit will adjust upward as price rises, closing ${trailingOffset}% below peak`
+              : `Take-profit will trigger when price reaches ${takeProfitPrice.toFixed(4)}. Monitor with ton_trading_check_stop_loss.`,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_set_take_profit failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Automated Trade Execution ──────────────────────────────────────────────
+
+  // ── Tool 26: ton_trading_auto_execute ──────────────────────────────────────
+  {
+    name: "ton_trading_auto_execute",
+    description:
+      "Evaluate a set of trigger conditions against current market data and automatically execute a trade if all conditions are met. Supports price target, technical threshold, and schedule-based triggers. Returns what was evaluated and whether a trade was submitted.",
+    category: "action",
+    scope: "dm-only",
+    parameters: {
+      type: "object",
+      properties: {
+        from_asset: {
+          type: "string",
+          description: 'Asset to sell — "TON" or a jetton master address',
+        },
+        to_asset: {
+          type: "string",
+          description: 'Asset to buy — "TON" or a jetton master address',
+        },
+        amount: {
+          type: "number",
+          description: "Amount of from_asset to trade when conditions are met",
+        },
+        mode: {
+          type: "string",
+          description: 'Trading mode: "real" or "simulation" (default "simulation")',
+          enum: ["real", "simulation"],
+        },
+        trigger_price_below: {
+          type: "number",
+          description: "Execute when current price falls below this value (buy-the-dip trigger)",
+        },
+        trigger_price_above: {
+          type: "number",
+          description: "Execute when current price rises above this value (breakout trigger)",
+        },
+        auto_close_at_profit_percent: {
+          type: "number",
+          description: "Automatically register a take-profit rule after execution at this profit %",
+          minimum: 0.1,
+        },
+        auto_stop_loss_percent: {
+          type: "number",
+          description: "Automatically register a stop-loss rule after execution at this loss %",
+          minimum: 0.1,
+        },
+        slippage: {
+          type: "number",
+          description: "Slippage tolerance for execution (default: plugin config, typically 0.05)",
+          minimum: 0.001,
+          maximum: 0.5,
+        },
+      },
+      required: ["from_asset", "to_asset", "amount"],
+    },
+    execute: async (params, _context) => {
+      const {
+        from_asset, to_asset, amount, mode = "simulation",
+        trigger_price_below, trigger_price_above,
+        auto_close_at_profit_percent, auto_stop_loss_percent,
+        slippage = sdk.pluginConfig.defaultSlippage ?? 0.05,
+      } = params;
+      try {
+        // Fetch current market price for evaluation
+        const [tonPrice, dexQuote] = await Promise.all([
+          sdk.ton.getPrice(),
+          sdk.ton.dex.quote({
+            fromAsset: from_asset,
+            toAsset: to_asset,
+            amount,
+          }).catch(() => null),
+        ]);
+
+        const currentPrice = dexQuote?.recommended
+          ? parseFloat(dexQuote[dexQuote.recommended]?.output ?? dexQuote[dexQuote.recommended]?.price ?? 0) / amount
+          : (tonPrice?.usd ?? null);
+
+        const conditions = [];
+        let allMet = true;
+
+        if (trigger_price_below != null) {
+          const met = currentPrice != null && currentPrice < trigger_price_below;
+          conditions.push({ type: "price_below", threshold: trigger_price_below, current: currentPrice, met });
+          if (!met) allMet = false;
+        }
+
+        if (trigger_price_above != null) {
+          const met = currentPrice != null && currentPrice > trigger_price_above;
+          conditions.push({ type: "price_above", threshold: trigger_price_above, current: currentPrice, met });
+          if (!met) allMet = false;
+        }
+
+        if (conditions.length === 0) {
+          // No conditions — execute immediately
+          allMet = true;
+        }
+
+        if (!allMet) {
+          return {
+            success: true,
+            data: {
+              executed: false,
+              reason: "Trigger conditions not met",
+              conditions,
+              current_price: currentPrice,
+            },
+          };
+        }
+
+        // ── Risk validation (same rules as ton_trading_validate_trade) ──────────
+        const maxTradePercent = sdk.pluginConfig.maxTradePercent ?? 10;
+        const minBalanceTON = sdk.pluginConfig.minBalanceTON ?? 1;
+
+        if (mode === "simulation" && from_asset === "TON") {
+          const simBalance = getSimBalance(sdk);
+          const maxAllowed = simBalance * (maxTradePercent / 100);
+          if (simBalance < minBalanceTON) {
+            return {
+              success: false,
+              error: `Simulation balance (${simBalance} TON) is below minimum (${minBalanceTON} TON)`,
+            };
+          }
+          if (amount > maxAllowed) {
+            return {
+              success: false,
+              error: `Amount ${amount} TON exceeds ${maxTradePercent}% of simulation balance (max ${maxAllowed.toFixed(4)} TON)`,
+            };
+          }
+          if (simBalance - amount < minBalanceTON) {
+            return {
+              success: false,
+              error: `Trade would bring simulation balance below minimum (${minBalanceTON} TON)`,
+            };
+          }
+        } else if (mode === "real" && from_asset === "TON") {
+          const realBalance = parseFloat((await sdk.ton.getBalance())?.balance ?? "0");
+          const maxAllowed = realBalance * (maxTradePercent / 100);
+          if (realBalance < minBalanceTON) {
+            return {
+              success: false,
+              error: `Wallet balance (${realBalance} TON) is below minimum (${minBalanceTON} TON)`,
+            };
+          }
+          if (amount > maxAllowed) {
+            return {
+              success: false,
+              error: `Amount ${amount} TON exceeds ${maxTradePercent}% of balance (max ${maxAllowed.toFixed(4)} TON)`,
+            };
+          }
+        }
+
+        // Execute the trade
+        let tradeResult;
+        if (mode === "simulation") {
+          const expectedOut = dexQuote?.recommended
+            ? parseFloat(dexQuote[dexQuote.recommended]?.output ?? dexQuote[dexQuote.recommended]?.price ?? 0)
+            : amount;
+
+          const tradeId = sdk.db
+            .prepare(
+              `INSERT INTO trade_journal
+               (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status, note)
+               VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, ?, 'open', 'auto_execute')`
+            )
+            .run(Date.now(), from_asset, to_asset, amount, expectedOut, tonPrice?.usd ?? null, null)
+            .lastInsertRowid;
+
+          if (from_asset === "TON") {
+            const simBalance = getSimBalance(sdk);
+            setSimBalance(sdk, simBalance - amount);
+          }
+
+          tradeResult = { trade_id: tradeId, mode: "simulation", from_asset, to_asset, amount_in: amount };
+        } else {
+          const swapResult = await sdk.ton.dex.swap({
+            fromAsset: from_asset,
+            toAsset: to_asset,
+            amount,
+            slippage,
+          });
+
+          const tradeId = sdk.db
+            .prepare(
+              `INSERT INTO trade_journal
+               (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
+               VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
+            )
+            .run(
+              Date.now(), from_asset, to_asset, amount,
+              swapResult?.expectedOutput ? parseFloat(swapResult.expectedOutput) : null,
+              tonPrice?.usd ?? null
+            )
+            .lastInsertRowid;
+
+          tradeResult = { trade_id: tradeId, mode: "real", from_asset, to_asset, amount_in: amount, dex: swapResult?.dex };
+        }
+
+        // Register automatic risk management rules if requested
+        const rules = [];
+        if (auto_close_at_profit_percent != null || auto_stop_loss_percent != null) {
+          const stopLossPct = auto_stop_loss_percent ?? 99;
+          const tpPct = auto_close_at_profit_percent ?? null;
+          const ruleId = sdk.db
+            .prepare(
+              `INSERT INTO stop_loss_rules (trade_id, stop_loss_percent, take_profit_percent, entry_price, created_at)
+               VALUES (?, ?, ?, ?, ?)`
+            )
+            .run(tradeResult.trade_id, stopLossPct, tpPct, currentPrice ?? amount, Date.now())
+            .lastInsertRowid;
+          rules.push({ rule_id: ruleId, stop_loss_percent: stopLossPct, take_profit_percent: tpPct });
+        }
+
+        sdk.log.info(`Auto-executed trade #${tradeResult.trade_id}: ${amount} ${from_asset} → ${to_asset}`);
+
+        return {
+          success: true,
+          data: {
+            executed: true,
+            trade: tradeResult,
+            conditions,
+            current_price: currentPrice,
+            risk_rules: rules,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_auto_execute failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Portfolio-Level Management ─────────────────────────────────────────────
+
+  // ── Tool 27: ton_trading_get_portfolio_summary ─────────────────────────────
+  {
+    name: "ton_trading_get_portfolio_summary",
+    description:
+      "Get a comprehensive portfolio overview with unrealized P&L for all open positions, total exposure, and performance metrics. Use this for a full snapshot of the portfolio before making allocation decisions.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          description: 'Include "real", "simulation", or "all" trades in the summary (default "all")',
+          enum: ["real", "simulation", "all"],
+        },
+      },
+    },
+    execute: async (params, _context) => {
+      const { mode = "all" } = params;
+      try {
+        const modeClause = mode === "all" ? "" : "AND mode = ?";
+        const modeArgs = mode === "all" ? [] : [mode];
+
+        const openTrades = sdk.db
+          .prepare(`SELECT * FROM trade_journal WHERE status = 'open' ${modeClause} ORDER BY timestamp DESC`)
+          .all(...modeArgs);
+
+        const closedTrades = sdk.db
+          .prepare(`SELECT pnl, pnl_percent, mode FROM trade_journal WHERE status = 'closed' ${modeClause}`)
+          .all(...modeArgs);
+
+        // Fetch current TON price for unrealized P&L estimation
+        const tonPrice = await sdk.ton.getPrice().catch(() => null);
+        const tonPriceUsd = tonPrice?.usd ?? null;
+
+        // Calculate portfolio metrics
+        const totalOpenPositions = openTrades.length;
+        const totalExposureTon = openTrades.reduce((sum, t) => sum + (t.from_asset === "TON" ? (t.amount_in ?? 0) : 0), 0);
+
+        const realizedPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+        const winCount = closedTrades.filter((t) => (t.pnl ?? 0) > 0).length;
+        const lossCount = closedTrades.filter((t) => (t.pnl ?? 0) < 0).length;
+        const winRate = closedTrades.length > 0 ? winCount / closedTrades.length : null;
+
+        const simBalance = getSimBalance(sdk);
+        const realBalance = await sdk.ton.getBalance().catch(() => null);
+
+        return {
+          success: true,
+          data: {
+            mode,
+            real_balance_ton: realBalance?.balance ?? null,
+            simulation_balance_ton: simBalance,
+            ton_price_usd: tonPriceUsd,
+            open_positions: totalOpenPositions,
+            total_exposure_ton: parseFloat(totalExposureTon.toFixed(4)),
+            realized_pnl_usd: parseFloat(realizedPnl.toFixed(4)),
+            total_closed_trades: closedTrades.length,
+            win_count: winCount,
+            loss_count: lossCount,
+            win_rate: winRate != null ? parseFloat(winRate.toFixed(4)) : null,
+            open_trades: openTrades.map((t) => ({
+              trade_id: t.id,
+              mode: t.mode,
+              from_asset: t.from_asset,
+              to_asset: t.to_asset,
+              amount_in: t.amount_in,
+              entry_price_usd: t.entry_price_usd,
+              opened_at: t.timestamp,
+            })),
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_get_portfolio_summary failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 28: ton_trading_rebalance_portfolio ───────────────────────────────
+  {
+    name: "ton_trading_rebalance_portfolio",
+    description:
+      "Calculate the trades needed to rebalance the portfolio to target allocations. Returns a rebalancing plan with suggested buy/sell actions. Does not execute trades — use ton_trading_execute_swap to act on the plan.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        target_allocations: {
+          type: "array",
+          description: "Target portfolio allocations as an array of {asset, percent} objects. Percents must sum to 100.",
+          items: {
+            type: "object",
+            properties: {
+              asset: { type: "string", description: 'Asset address or "TON"' },
+              percent: { type: "number", description: "Target allocation percent (0–100)" },
+            },
+            required: ["asset", "percent"],
+          },
+          minItems: 1,
+        },
+        mode: {
+          type: "string",
+          description: 'Use "real" wallet balance or "simulation" balance (default "real")',
+          enum: ["real", "simulation"],
+        },
+      },
+      required: ["target_allocations"],
+    },
+    execute: async (params, _context) => {
+      const { target_allocations, mode = "real" } = params;
+      try {
+        const totalPercent = target_allocations.reduce((s, a) => s + a.percent, 0);
+        if (Math.abs(totalPercent - 100) > 0.01) {
+          return { success: false, error: `Target allocations must sum to 100% (got ${totalPercent.toFixed(2)}%)` };
+        }
+
+        const totalBalance =
+          mode === "simulation"
+            ? getSimBalance(sdk)
+            : parseFloat((await sdk.ton.getBalance())?.balance ?? "0");
+
+        const tonPrice = await sdk.ton.getPrice().catch(() => null);
+        const tonPriceUsd = tonPrice?.usd ?? 1;
+
+        const tonBalanceUsd = totalBalance * tonPriceUsd;
+
+        // Fetch current jetton holdings for real mode
+        let jettonHoldings = [];
+        if (mode === "real") {
+          jettonHoldings = await sdk.ton.getJettonBalances().catch(() => []);
+        }
+
+        // For each unique jetton in target_allocations, fetch a DEX quote to convert
+        // token balance → USD value. Raw token units are NOT USD for non-stable assets.
+        const jettonPricesUsd = {};
+        for (const target of target_allocations) {
+          if (target.asset !== "TON") {
+            const holding = jettonHoldings.find((j) => j.jettonAddress === target.asset);
+            if (holding && parseFloat(holding.balanceFormatted ?? holding.balance ?? "0") > 0) {
+              const tokenBalance = parseFloat(holding.balanceFormatted ?? holding.balance ?? "0");
+              // Quote 1 unit of the jetton to TON to get the price
+              const priceQuote = await sdk.ton.dex.quote({
+                fromAsset: target.asset,
+                toAsset: "TON",
+                amount: 1,
+              }).catch(() => null);
+              if (priceQuote) {
+                const tonPerToken = parseFloat(
+                  priceQuote[priceQuote.recommended]?.output ??
+                  priceQuote[priceQuote.recommended]?.price ??
+                  0
+                );
+                jettonPricesUsd[target.asset] = {
+                  tokenBalance,
+                  valueUsd: tokenBalance * tonPerToken * tonPriceUsd,
+                };
+              }
+            }
+          }
+        }
+
+        // Total portfolio USD = TON holdings + all priced jetton holdings
+        const jettonTotalUsd = Object.values(jettonPricesUsd).reduce(
+          (sum, j) => sum + j.valueUsd,
+          0
+        );
+        const totalValueUsd = tonBalanceUsd + jettonTotalUsd;
+
+        const rebalancingPlan = target_allocations.map((target) => {
+          const targetValueUsd = totalValueUsd * (target.percent / 100);
+          let currentValueUsd = 0;
+
+          if (target.asset === "TON") {
+            currentValueUsd = totalBalance * tonPriceUsd;
+          } else if (jettonPricesUsd[target.asset]) {
+            // Use market-price-based USD value for jetton holdings
+            currentValueUsd = jettonPricesUsd[target.asset].valueUsd;
+          } else {
+            // No holding or no price available — assume zero current value
+            currentValueUsd = 0;
+          }
+
+          const diffUsd = targetValueUsd - currentValueUsd;
+          const diffTon = diffUsd / tonPriceUsd;
+
+          return {
+            asset: target.asset,
+            target_percent: target.percent,
+            target_value_usd: parseFloat(targetValueUsd.toFixed(2)),
+            current_value_usd: parseFloat(currentValueUsd.toFixed(2)),
+            diff_usd: parseFloat(diffUsd.toFixed(2)),
+            diff_ton: parseFloat(diffTon.toFixed(4)),
+            action: diffUsd > 1 ? "buy" : diffUsd < -1 ? "sell" : "hold",
+          };
+        });
+
+        const actions = rebalancingPlan.filter((p) => p.action !== "hold");
+
+        return {
+          success: true,
+          data: {
+            mode,
+            total_portfolio_value_usd: parseFloat(totalValueUsd.toFixed(2)),
+            ton_balance: parseFloat(totalBalance.toFixed(4)),
+            ton_balance_usd: parseFloat(tonBalanceUsd.toFixed(2)),
+            jetton_holdings_usd: parseFloat(jettonTotalUsd.toFixed(2)),
+            ton_price_usd: tonPriceUsd,
+            rebalancing_plan: rebalancingPlan,
+            actions_required: actions.length,
+            note: actions.length > 0
+              ? `${actions.length} asset(s) need rebalancing. Execute using ton_trading_execute_swap.`
+              : "Portfolio is already balanced — no trades needed.",
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_rebalance_portfolio failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Advanced Market Data ───────────────────────────────────────────────────
+
+  // ── Tool 29: ton_trading_get_technical_indicators ──────────────────────────
+  {
+    name: "ton_trading_get_technical_indicators",
+    description:
+      "Calculate RSI, MACD, and Bollinger Bands for a TON token pair using recent price data. Returns indicator values and trading signals (overbought/oversold). Use to inform entry and exit decisions.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        token_address: {
+          type: "string",
+          description: 'Token address to analyse — "TON" for native TON or a jetton master address',
+        },
+        timeframe: {
+          type: "string",
+          description: 'Candle timeframe: "1h", "4h", "1d" (default "1h")',
+          enum: ["1h", "4h", "1d"],
+        },
+        periods: {
+          type: "integer",
+          description: "Number of candles to use for calculations (default 14 for RSI, 26 for MACD)",
+          minimum: 5,
+          maximum: 100,
+        },
+      },
+      required: ["token_address"],
+    },
+    execute: async (params, _context) => {
+      const { token_address, timeframe = "1h", periods = 14 } = params;
+      try {
+        const cacheKey = `indicators:${token_address}:${timeframe}`;
+        const cached = sdk.storage.get(cacheKey);
+        if (cached) return { success: true, data: cached };
+
+        // Fetch OHLCV data from GeckoTerminal
+        const resolution = timeframe === "1h" ? "hour" : timeframe === "4h" ? "4h" : "day";
+        const limit = Math.max(periods + 10, 50);
+
+        const res = await fetch(
+          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(token_address)}/ohlcv/${resolution}?limit=${limit}&currency=usd`,
+          { signal: AbortSignal.timeout(15_000), headers: { Accept: "application/json" } }
+        );
+
+        if (!res.ok) {
+          return { success: false, error: `GeckoTerminal OHLCV API returned ${res.status}` };
+        }
+
+        const json = await res.json();
+        const ohlcv = (json?.data?.attributes?.ohlcv_list ?? []).map(([ts, o, h, l, c, v]) => ({
+          timestamp: ts * 1000,
+          open: parseFloat(o),
+          high: parseFloat(h),
+          low: parseFloat(l),
+          close: parseFloat(c),
+          volume: parseFloat(v),
+        }));
+
+        if (ohlcv.length < periods) {
+          return { success: false, error: `Not enough price data: need ${periods} candles, got ${ohlcv.length}` };
+        }
+
+        const closes = ohlcv.map((c) => c.close);
+        const currentPrice = closes[closes.length - 1];
+
+        // ── RSI (Relative Strength Index) ──────────────────────────────────
+        const rsiPeriod = periods;
+        const gains = [], losses = [];
+        for (let i = 1; i < closes.length; i++) {
+          const diff = closes[i] - closes[i - 1];
+          gains.push(diff > 0 ? diff : 0);
+          losses.push(diff < 0 ? Math.abs(diff) : 0);
+        }
+        const avgGain = gains.slice(-rsiPeriod).reduce((s, g) => s + g, 0) / rsiPeriod;
+        const avgLoss = losses.slice(-rsiPeriod).reduce((s, l) => s + l, 0) / rsiPeriod;
+        const rs = avgLoss > 0 ? avgGain / avgLoss : 100;
+        const rsi = parseFloat((100 - 100 / (1 + rs)).toFixed(2));
+
+        // ── MACD (Moving Average Convergence Divergence) ───────────────────
+        function ema(data, n) {
+          const k = 2 / (n + 1);
+          let emaVal = data[0];
+          for (let i = 1; i < data.length; i++) {
+            emaVal = data[i] * k + emaVal * (1 - k);
+          }
+          return emaVal;
+        }
+        const ema12 = ema(closes, 12);
+        const ema26 = ema(closes, 26);
+        const macdLine = parseFloat((ema12 - ema26).toFixed(6));
+        const signalLine = parseFloat(ema(closes.slice(-9), 9).toFixed(6));
+        const macdHistogram = parseFloat((macdLine - signalLine).toFixed(6));
+
+        // ── Bollinger Bands ────────────────────────────────────────────────
+        const bbPeriod = 20;
+        const recentCloses = closes.slice(-bbPeriod);
+        const bbMean = recentCloses.reduce((s, c) => s + c, 0) / bbPeriod;
+        const bbStdDev = Math.sqrt(recentCloses.reduce((s, c) => s + (c - bbMean) ** 2, 0) / bbPeriod);
+        const bbUpper = parseFloat((bbMean + 2 * bbStdDev).toFixed(6));
+        const bbLower = parseFloat((bbMean - 2 * bbStdDev).toFixed(6));
+        const bbMiddle = parseFloat(bbMean.toFixed(6));
+
+        // ── Signals ────────────────────────────────────────────────────────
+        const signals = [];
+        if (rsi < 30) signals.push({ indicator: "RSI", signal: "oversold", strength: "strong", note: `RSI ${rsi} < 30 — potential buy signal` });
+        else if (rsi > 70) signals.push({ indicator: "RSI", signal: "overbought", strength: "strong", note: `RSI ${rsi} > 70 — potential sell signal` });
+        if (macdHistogram > 0 && macdLine > 0) signals.push({ indicator: "MACD", signal: "bullish", strength: "moderate", note: "MACD above signal line" });
+        else if (macdHistogram < 0 && macdLine < 0) signals.push({ indicator: "MACD", signal: "bearish", strength: "moderate", note: "MACD below signal line" });
+        if (currentPrice <= bbLower) signals.push({ indicator: "Bollinger", signal: "oversold", strength: "moderate", note: "Price at lower band" });
+        else if (currentPrice >= bbUpper) signals.push({ indicator: "Bollinger", signal: "overbought", strength: "moderate", note: "Price at upper band" });
+
+        const data = {
+          token_address,
+          timeframe,
+          current_price: currentPrice,
+          candles_analysed: ohlcv.length,
+          rsi: { value: rsi, signal: rsi < 30 ? "oversold" : rsi > 70 ? "overbought" : "neutral" },
+          macd: { macd_line: macdLine, signal_line: signalLine, histogram: macdHistogram, signal: macdHistogram > 0 ? "bullish" : "bearish" },
+          bollinger_bands: { upper: bbUpper, middle: bbMiddle, lower: bbLower, bandwidth: parseFloat((bbUpper - bbLower).toFixed(6)) },
+          signals,
+          calculated_at: Date.now(),
+        };
+
+        sdk.storage.set(cacheKey, data, { ttl: 300_000 });
+        return { success: true, data };
+      } catch (err) {
+        sdk.log.error(`ton_trading_get_technical_indicators failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 30: ton_trading_get_order_book_depth ──────────────────────────────
+  {
+    name: "ton_trading_get_order_book_depth",
+    description:
+      "Analyse order book depth and liquidity for a token pair. Returns bid/ask spread, depth at various price levels, and estimated price impact for a given trade size. Use before large trades to assess slippage risk.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        from_asset: {
+          type: "string",
+          description: 'Asset to sell — "TON" or a jetton master address',
+        },
+        to_asset: {
+          type: "string",
+          description: 'Asset to buy — "TON" or a jetton master address',
+        },
+        trade_amount: {
+          type: "number",
+          description: "Trade size to estimate price impact for (in from_asset units)",
+        },
+      },
+      required: ["from_asset", "to_asset"],
+    },
+    execute: async (params, _context) => {
+      const { from_asset, to_asset, trade_amount } = params;
+      try {
+        const cacheKey = `orderbook:${from_asset}:${to_asset}`;
+        const cached = sdk.storage.get(cacheKey);
+        if (cached && !trade_amount) return { success: true, data: cached };
+
+        // Fetch quotes at different sizes to construct a synthetic order book
+        const testAmounts = [0.1, 1, 5, 10, 50, 100];
+        const quotePromises = testAmounts.map((amt) =>
+          sdk.ton.dex.quote({ fromAsset: from_asset, toAsset: to_asset, amount: amt })
+            .catch(() => null)
+        );
+
+        const quotes = await Promise.all(quotePromises);
+
+        const depthLevels = testAmounts.map((amt, i) => {
+          const q = quotes[i];
+          if (!q) return null;
+          const output = parseFloat(q.recommended ? q[q.recommended]?.output ?? q[q.recommended]?.price ?? 0 : 0);
+          const effectivePrice = output > 0 ? output / amt : null;
+          return { amount_in: amt, amount_out: output, effective_price: effectivePrice };
+        }).filter(Boolean);
+
+        // Calculate spread and price impact
+        let bidAskSpread = null;
+        let priceImpactPercent = null;
+
+        if (depthLevels.length >= 2) {
+          const basePrice = depthLevels[0]?.effective_price;
+          const largePrice = depthLevels[depthLevels.length - 1]?.effective_price;
+          if (basePrice && largePrice) {
+            bidAskSpread = parseFloat(Math.abs(basePrice - largePrice).toFixed(6));
+            priceImpactPercent = parseFloat(((Math.abs(basePrice - largePrice) / basePrice) * 100).toFixed(4));
+          }
+        }
+
+        let customTradeImpact = null;
+        if (trade_amount != null) {
+          const customQuote = await sdk.ton.dex.quote({
+            fromAsset: from_asset,
+            toAsset: to_asset,
+            amount: trade_amount,
+          }).catch(() => null);
+
+          if (customQuote) {
+            const output = parseFloat(customQuote.recommended ? customQuote[customQuote.recommended]?.output ?? customQuote[customQuote.recommended]?.price ?? 0 : 0);
+            const basePrice = depthLevels[0]?.effective_price;
+            const effectivePrice = output > 0 ? output / trade_amount : null;
+            customTradeImpact = {
+              trade_amount,
+              expected_output: output,
+              effective_price: effectivePrice,
+              price_impact_percent: basePrice && effectivePrice
+                ? parseFloat((Math.abs(effectivePrice - basePrice) / basePrice * 100).toFixed(4))
+                : null,
+            };
+          }
+        }
+
+        const data = {
+          from_asset,
+          to_asset,
+          depth_levels: depthLevels,
+          bid_ask_spread: bidAskSpread,
+          price_impact_percent_large: priceImpactPercent,
+          custom_trade_impact: customTradeImpact,
+          liquidity_rating: priceImpactPercent == null ? null :
+            priceImpactPercent < 0.5 ? "high" : priceImpactPercent < 2 ? "medium" : "low",
+          fetched_at: Date.now(),
+        };
+
+        sdk.storage.set(cacheKey, data, { ttl: 30_000 });
+        return { success: true, data };
+      } catch (err) {
+        sdk.log.error(`ton_trading_get_order_book_depth failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Scheduled Trading Features ─────────────────────────────────────────────
+
+  // ── Tool 31: ton_trading_create_schedule ───────────────────────────────────
+  {
+    name: "ton_trading_create_schedule",
+    description:
+      "Create a recurring trading schedule for strategies like dollar-cost averaging (DCA) or grid trading. Stores multiple pending trades at calculated intervals. Use ton_trading_get_scheduled_trades to check and execute due trades.",
+    category: "action",
+    parameters: {
+      type: "object",
+      properties: {
+        strategy: {
+          type: "string",
+          description: 'Schedule strategy: "dca" (dollar-cost averaging at regular intervals) or "grid" (trades at price levels)',
+          enum: ["dca", "grid"],
+        },
+        from_asset: {
+          type: "string",
+          description: 'Asset to sell — "TON" or a jetton master address',
+        },
+        to_asset: {
+          type: "string",
+          description: 'Asset to buy — "TON" or a jetton master address',
+        },
+        amount_per_trade: {
+          type: "number",
+          description: "Amount per individual trade execution",
+          minimum: 0.001,
+        },
+        mode: {
+          type: "string",
+          description: 'Trading mode: "real" or "simulation" (default "simulation")',
+          enum: ["real", "simulation"],
+        },
+        interval_hours: {
+          type: "number",
+          description: 'For DCA strategy: hours between each trade (e.g. 24 for daily). Required for "dca" strategy.',
+          minimum: 1,
+        },
+        num_orders: {
+          type: "integer",
+          description: "Number of orders to schedule (default 5)",
+          minimum: 1,
+          maximum: 100,
+        },
+        note: {
+          type: "string",
+          description: "Optional label for this schedule (e.g. 'Daily DCA into TON')",
+        },
+      },
+      required: ["strategy", "from_asset", "to_asset", "amount_per_trade"],
+    },
+    execute: async (params, _context) => {
+      const {
+        strategy, from_asset, to_asset, amount_per_trade,
+        mode = "simulation", interval_hours = 24, num_orders = 5, note,
+      } = params;
+      try {
+        if (strategy === "dca" && !interval_hours) {
+          return { success: false, error: 'interval_hours is required for "dca" strategy' };
+        }
+
+        const scheduledIds = [];
+        const now = Date.now();
+
+        for (let i = 0; i < num_orders; i++) {
+          const executeAt = strategy === "dca"
+            ? now + (i + 1) * interval_hours * 60 * 60 * 1000
+            : now + (i + 1) * 3600 * 1000; // grid: 1h intervals by default
+
+          const id = sdk.db
+            .prepare(
+              `INSERT INTO scheduled_trades (created_at, execute_at, mode, from_asset, to_asset, amount, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`
+            )
+            .run(now, executeAt, mode, from_asset, to_asset, amount_per_trade,
+              note ? `[${strategy}] ${note}` : `[${strategy}] order ${i + 1}/${num_orders}`)
+            .lastInsertRowid;
+
+          scheduledIds.push({ order: i + 1, schedule_id: id, execute_at: executeAt });
+        }
+
+        sdk.log.info(`Scheduled ${num_orders} ${strategy} orders: ${from_asset} → ${to_asset}`);
+
+        return {
+          success: true,
+          data: {
+            strategy,
+            mode,
+            from_asset,
+            to_asset,
+            amount_per_trade,
+            num_orders_created: scheduledIds.length,
+            total_amount: parseFloat((amount_per_trade * num_orders).toFixed(4)),
+            schedule: scheduledIds,
+            note: `${num_orders} orders scheduled. Check and execute due ones with ton_trading_get_scheduled_trades.`,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_create_schedule failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 32: ton_trading_cancel_schedule ───────────────────────────────────
+  {
+    name: "ton_trading_cancel_schedule",
+    description:
+      "Cancel one or more scheduled (pending) trades. Can cancel a single trade by ID, or all pending trades for a given asset pair. Returns the number of trades cancelled.",
+    category: "action",
+    parameters: {
+      type: "object",
+      properties: {
+        schedule_id: {
+          type: "integer",
+          description: "Specific scheduled trade ID to cancel. If omitted, cancel all matching pending trades.",
+        },
+        from_asset: {
+          type: "string",
+          description: "Cancel all pending trades selling this asset (used when schedule_id is omitted)",
+        },
+        to_asset: {
+          type: "string",
+          description: "Cancel all pending trades buying this asset (used when schedule_id is omitted)",
+        },
+      },
+    },
+    execute: async (params, _context) => {
+      const { schedule_id, from_asset, to_asset } = params;
+      try {
+        let cancelledCount = 0;
+
+        if (schedule_id != null) {
+          const row = sdk.db.prepare("SELECT id, status FROM scheduled_trades WHERE id = ?").get(schedule_id);
+          if (!row) return { success: false, error: `Scheduled trade ${schedule_id} not found` };
+          if (row.status !== "pending") return { success: false, error: `Scheduled trade ${schedule_id} is not pending (status: ${row.status})` };
+
+          sdk.db.prepare("UPDATE scheduled_trades SET status = 'cancelled' WHERE id = ?").run(schedule_id);
+          cancelledCount = 1;
+        } else if (from_asset || to_asset) {
+          const conditions = ["status = 'pending'"];
+          const args = [];
+          if (from_asset) { conditions.push("from_asset = ?"); args.push(from_asset); }
+          if (to_asset) { conditions.push("to_asset = ?"); args.push(to_asset); }
+
+          const result = sdk.db
+            .prepare(`UPDATE scheduled_trades SET status = 'cancelled' WHERE ${conditions.join(" AND ")}`)
+            .run(...args);
+          cancelledCount = result.changes;
+        } else {
+          return { success: false, error: "Provide either schedule_id or from_asset/to_asset to cancel" };
+        }
+
+        sdk.log.info(`Cancelled ${cancelledCount} scheduled trade(s)`);
+
+        return {
+          success: true,
+          data: {
+            cancelled_count: cancelledCount,
+            schedule_id: schedule_id ?? null,
+            from_asset: from_asset ?? null,
+            to_asset: to_asset ?? null,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_cancel_schedule failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Performance Analytics ──────────────────────────────────────────────────
+
+  // ── Tool 33: ton_trading_get_performance_dashboard ─────────────────────────
+  {
+    name: "ton_trading_get_performance_dashboard",
+    description:
+      "Get a real-time performance dashboard with key trading metrics: total P&L, win rate, best/worst trades, average holding time, and daily/weekly breakdown. Use for strategy optimization and monitoring.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          description: 'Analyse "real", "simulation", or "all" trades (default "all")',
+          enum: ["real", "simulation", "all"],
+        },
+        days: {
+          type: "integer",
+          description: "Number of days to include in the report (default 30)",
+          minimum: 1,
+          maximum: 365,
+        },
+      },
+    },
+    execute: async (params, _context) => {
+      const { mode = "all", days = 30 } = params;
+      try {
+        const since = Date.now() - days * 24 * 60 * 60 * 1000;
+        const modeClause = mode === "all" ? "" : "AND mode = ?";
+        const modeArgs = mode === "all" ? [] : [mode];
+
+        const trades = sdk.db
+          .prepare(
+            `SELECT * FROM trade_journal WHERE status = 'closed' AND timestamp >= ? ${modeClause} ORDER BY timestamp ASC`
+          )
+          .all(since, ...modeArgs);
+
+        const openTrades = sdk.db
+          .prepare(`SELECT COUNT(*) as count FROM trade_journal WHERE status = 'open' ${modeClause}`)
+          .get(...modeArgs);
+
+        if (trades.length === 0) {
+          return {
+            success: true,
+            data: {
+              mode, days,
+              total_trades: 0,
+              open_positions: openTrades?.count ?? 0,
+              note: "No closed trades in the selected period",
+            },
+          };
+        }
+
+        const totalPnl = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+        const wins = trades.filter((t) => (t.pnl ?? 0) > 0);
+        const losses = trades.filter((t) => (t.pnl ?? 0) < 0);
+        const winRate = trades.length > 0 ? wins.length / trades.length : 0;
+
+        const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl ?? 0), 0) / wins.length : 0;
+        const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl ?? 0), 0) / losses.length : 0;
+
+        const bestTrade = trades.reduce((best, t) => (t.pnl ?? 0) > (best.pnl ?? 0) ? t : best, trades[0]);
+        const worstTrade = trades.reduce((worst, t) => (t.pnl ?? 0) < (worst.pnl ?? 0) ? t : worst, trades[0]);
+
+        const profitFactor = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : null;
+
+        // Daily P&L breakdown
+        const dailyPnl = {};
+        for (const t of trades) {
+          const day = new Date(t.timestamp).toISOString().slice(0, 10);
+          dailyPnl[day] = (dailyPnl[day] ?? 0) + (t.pnl ?? 0);
+        }
+
+        return {
+          success: true,
+          data: {
+            mode,
+            period_days: days,
+            total_trades: trades.length,
+            open_positions: openTrades?.count ?? 0,
+            win_count: wins.length,
+            loss_count: losses.length,
+            win_rate: parseFloat(winRate.toFixed(4)),
+            total_pnl_usd: parseFloat(totalPnl.toFixed(4)),
+            avg_win_usd: parseFloat(avgWin.toFixed(4)),
+            avg_loss_usd: parseFloat(avgLoss.toFixed(4)),
+            profit_factor: profitFactor != null ? parseFloat(profitFactor.toFixed(2)) : null,
+            best_trade: { trade_id: bestTrade.id, pnl: bestTrade.pnl, pnl_percent: bestTrade.pnl_percent },
+            worst_trade: { trade_id: worstTrade.id, pnl: worstTrade.pnl, pnl_percent: worstTrade.pnl_percent },
+            daily_pnl: Object.entries(dailyPnl).map(([date, pnl]) => ({ date, pnl: parseFloat(pnl.toFixed(4)) })),
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_get_performance_dashboard failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 34: ton_trading_export_trades ─────────────────────────────────────
+  {
+    name: "ton_trading_export_trades",
+    description:
+      "Export trade history from the journal in a structured format suitable for external analysis. Returns all trade records with full P&L data for the specified period and mode.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          description: 'Export "real", "simulation", or "all" trades (default "all")',
+          enum: ["real", "simulation", "all"],
+        },
+        status: {
+          type: "string",
+          description: 'Export "open", "closed", or "all" trades (default "all")',
+          enum: ["open", "closed", "all"],
+        },
+        days: {
+          type: "integer",
+          description: "Limit to trades from the last N days. Omit for all history.",
+          minimum: 1,
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum number of records to return (default 200, max 1000)",
+          minimum: 1,
+          maximum: 1000,
+        },
+      },
+    },
+    execute: async (params, _context) => {
+      const { mode = "all", status = "all", days, limit = 200 } = params;
+      try {
+        const conditions = [];
+        const args = [];
+
+        if (mode !== "all") { conditions.push("mode = ?"); args.push(mode); }
+        if (status !== "all") { conditions.push("status = ?"); args.push(status); }
+        if (days != null) {
+          const since = Date.now() - days * 24 * 60 * 60 * 1000;
+          conditions.push("timestamp >= ?");
+          args.push(since);
+        }
+
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+        const trades = sdk.db
+          .prepare(`SELECT * FROM trade_journal ${where} ORDER BY timestamp DESC LIMIT ?`)
+          .all(...args, limit);
+
+        const totalPnl = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
+        const closedTrades = trades.filter((t) => t.status === "closed");
+
+        return {
+          success: true,
+          data: {
+            filters: { mode, status, days: days ?? "all" },
+            total_records: trades.length,
+            total_pnl_usd: parseFloat(totalPnl.toFixed(4)),
+            closed_count: closedTrades.length,
+            open_count: trades.length - closedTrades.length,
+            trades,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_export_trades failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Risk Management Enhancement ────────────────────────────────────────────
+
+  // ── Tool 35: ton_trading_dynamic_stop_loss ─────────────────────────────────
+  {
+    name: "ton_trading_dynamic_stop_loss",
+    description:
+      "Calculate and register a volatility-adjusted stop-loss level for a trade. Uses Average True Range (ATR) to size the stop-loss proportional to recent market volatility, preventing premature stop-outs on volatile assets.",
+    category: "action",
+    parameters: {
+      type: "object",
+      properties: {
+        trade_id: {
+          type: "integer",
+          description: "Journal trade ID to protect",
+        },
+        token_address: {
+          type: "string",
+          description: "Token address to fetch volatility data for",
+        },
+        entry_price: {
+          type: "number",
+          description: "Price at which the position was opened",
+        },
+        atr_multiplier: {
+          type: "number",
+          description: "Multiplier applied to ATR to set stop distance (default 2.0 — 2× ATR below entry)",
+          minimum: 0.5,
+          maximum: 10,
+        },
+        max_stop_loss_percent: {
+          type: "number",
+          description: "Maximum allowed stop-loss in percent, regardless of volatility (default 15)",
+          minimum: 1,
+          maximum: 99,
+        },
+        take_profit_atr_multiplier: {
+          type: "number",
+          description: "Optional: set take-profit at this many ATRs above entry (e.g. 3.0 for 3× ATR)",
+          minimum: 0.5,
+        },
+      },
+      required: ["trade_id", "token_address", "entry_price"],
+    },
+    execute: async (params, _context) => {
+      const {
+        trade_id, token_address, entry_price,
+        atr_multiplier = 2.0, max_stop_loss_percent = 15,
+        take_profit_atr_multiplier,
+      } = params;
+      try {
+        const entry = sdk.db.prepare("SELECT id, status FROM trade_journal WHERE id = ?").get(trade_id);
+        if (!entry) return { success: false, error: `Trade ${trade_id} not found` };
+        if (entry.status === "closed") return { success: false, error: `Trade ${trade_id} is already closed` };
+
+        // Fetch recent OHLCV data to calculate ATR
+        const res = await fetch(
+          `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(token_address)}/ohlcv/hour?limit=20&currency=usd`,
+          { signal: AbortSignal.timeout(15_000), headers: { Accept: "application/json" } }
+        );
+
+        let atr = entry_price * 0.03; // fallback: 3% of price
+        let atrPercent = 3;
+
+        if (res.ok) {
+          const json = await res.json();
+          const ohlcv = (json?.data?.attributes?.ohlcv_list ?? []).map(([, , h, l, c]) => ({
+            high: parseFloat(h), low: parseFloat(l), close: parseFloat(c),
+          }));
+
+          if (ohlcv.length >= 2) {
+            const trueRanges = ohlcv.slice(1).map((candle, i) => {
+              const prevClose = ohlcv[i].close;
+              return Math.max(
+                candle.high - candle.low,
+                Math.abs(candle.high - prevClose),
+                Math.abs(candle.low - prevClose)
+              );
+            });
+            atr = trueRanges.reduce((s, r) => s + r, 0) / trueRanges.length;
+            atrPercent = (atr / entry_price) * 100;
+          }
+        }
+
+        // Clamp stop-loss to max_stop_loss_percent
+        const dynamicStopPercent = Math.min(atrPercent * atr_multiplier, max_stop_loss_percent);
+        const takeProfitPercent = take_profit_atr_multiplier != null
+          ? atrPercent * take_profit_atr_multiplier
+          : null;
+
+        // Register the rule
+        const ruleId = sdk.db
+          .prepare(
+            `INSERT INTO stop_loss_rules (trade_id, stop_loss_percent, take_profit_percent, entry_price, created_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(trade_id, dynamicStopPercent, takeProfitPercent ?? null, entry_price, Date.now())
+          .lastInsertRowid;
+
+        const stopLossPrice = entry_price * (1 - dynamicStopPercent / 100);
+        const takeProfitPrice = takeProfitPercent != null ? entry_price * (1 + takeProfitPercent / 100) : null;
+
+        sdk.log.info(`Dynamic stop-loss #${ruleId} set for trade #${trade_id}: ATR=${atr.toFixed(6)}, SL=${dynamicStopPercent.toFixed(2)}%`);
+
+        return {
+          success: true,
+          data: {
+            rule_id: ruleId,
+            trade_id,
+            entry_price,
+            atr,
+            atr_percent: parseFloat(atrPercent.toFixed(4)),
+            atr_multiplier,
+            dynamic_stop_loss_percent: parseFloat(dynamicStopPercent.toFixed(4)),
+            stop_loss_price: parseFloat(stopLossPrice.toFixed(6)),
+            take_profit_price: takeProfitPrice != null ? parseFloat(takeProfitPrice.toFixed(6)) : null,
+            take_profit_percent: takeProfitPercent != null ? parseFloat(takeProfitPercent.toFixed(4)) : null,
+            was_clamped: atrPercent * atr_multiplier > max_stop_loss_percent,
+            status: "active",
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_dynamic_stop_loss failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 36: ton_trading_position_sizing ───────────────────────────────────
+  {
+    name: "ton_trading_position_sizing",
+    description:
+      "Calculate the optimal position size for a trade based on current portfolio volatility. Combines Kelly Criterion with volatility-scaled risk limits to recommend a position size that preserves capital under adverse conditions.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          description: 'Use "real" or "simulation" balance (default "simulation")',
+          enum: ["real", "simulation"],
+        },
+        token_address: {
+          type: "string",
+          description: "Token address to fetch volatility data for position sizing",
+        },
+        risk_per_trade_percent: {
+          type: "number",
+          description: "Maximum portfolio percentage to risk on this single trade (default 2%)",
+          minimum: 0.1,
+          maximum: 20,
+        },
+        stop_loss_percent: {
+          type: "number",
+          description: "Planned stop-loss percentage for this trade (used for position sizing)",
+          minimum: 0.1,
+          maximum: 99,
+        },
+        conviction_level: {
+          type: "string",
+          description: 'Trade conviction: "low" (0.5× sizing), "medium" (1×), "high" (1.5×). Default "medium".',
+          enum: ["low", "medium", "high"],
+        },
+      },
+      required: ["token_address", "stop_loss_percent"],
+    },
+    execute: async (params, _context) => {
+      const {
+        mode = "simulation", token_address, risk_per_trade_percent = 2,
+        stop_loss_percent, conviction_level = "medium",
+      } = params;
+      try {
+        const balance = mode === "simulation"
+          ? getSimBalance(sdk)
+          : parseFloat((await sdk.ton.getBalance())?.balance ?? "0");
+
+        // Fetch recent volatility data
+        let volatilityPercent = stop_loss_percent; // fallback: use stop-loss as proxy
+        try {
+          const res = await fetch(
+            `https://api.geckoterminal.com/api/v2/networks/ton/tokens/${encodeURIComponent(token_address)}/ohlcv/hour?limit=24&currency=usd`,
+            { signal: AbortSignal.timeout(10_000), headers: { Accept: "application/json" } }
+          );
+          if (res.ok) {
+            const json = await res.json();
+            const closes = (json?.data?.attributes?.ohlcv_list ?? []).map(([, , , , c]) => parseFloat(c));
+            if (closes.length >= 5) {
+              const returns = closes.slice(1).map((c, i) => Math.abs(c - closes[i]) / closes[i] * 100);
+              volatilityPercent = returns.reduce((s, r) => s + r, 0) / returns.length;
+            }
+          }
+        } catch {
+          // use fallback
+        }
+
+        // Base position size: risk% of balance / stop-loss%
+        const convictionMultiplier = { low: 0.5, medium: 1.0, high: 1.5 }[conviction_level] ?? 1.0;
+        const baseSize = balance * (risk_per_trade_percent / 100) / (stop_loss_percent / 100);
+        const volatilityAdjustedSize = baseSize * Math.min(1, stop_loss_percent / (volatilityPercent * 2 || stop_loss_percent));
+        const finalSize = parseFloat((volatilityAdjustedSize * convictionMultiplier).toFixed(4));
+        const maxSize = balance * 0.25; // hard cap at 25% of balance
+
+        // Historical trade win rate
+        const historicalTrades = sdk.db
+          .prepare("SELECT pnl_percent FROM trade_journal WHERE status = 'closed' AND mode = ? LIMIT 50")
+          .all(mode);
+        const winRate = historicalTrades.length > 0
+          ? historicalTrades.filter((t) => (t.pnl_percent ?? 0) > 0).length / historicalTrades.length
+          : 0.5;
+
+        return {
+          success: true,
+          data: {
+            mode,
+            balance_ton: parseFloat(balance.toFixed(4)),
+            token_address,
+            risk_per_trade_percent,
+            stop_loss_percent,
+            volatility_percent_24h: parseFloat(volatilityPercent.toFixed(4)),
+            conviction_level,
+            conviction_multiplier: convictionMultiplier,
+            historical_win_rate: parseFloat(winRate.toFixed(4)),
+            base_position_size_ton: parseFloat(baseSize.toFixed(4)),
+            volatility_adjusted_size_ton: parseFloat(volatilityAdjustedSize.toFixed(4)),
+            recommended_position_size_ton: Math.min(finalSize, maxSize),
+            hard_cap_ton: parseFloat(maxSize.toFixed(4)),
+            recommendation: finalSize > maxSize
+              ? `Position capped at ${maxSize.toFixed(2)} TON (25% balance limit). Consider reducing conviction or risk%.`
+              : `Recommended position: ${finalSize.toFixed(2)} TON (${(finalSize / balance * 100).toFixed(1)}% of balance)`,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_position_sizing failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Multi-DEX Coordination ─────────────────────────────────────────────────
+
+  // ── Tool 37: ton_trading_cross_dex_routing ─────────────────────────────────
+  {
+    name: "ton_trading_cross_dex_routing",
+    description:
+      "Find the optimal execution path across multiple DEXes for a token swap. Analyses split routing (partial fill on multiple DEXes) to minimise price impact and maximise output. Returns a routing plan for the LLM to execute.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        from_asset: {
+          type: "string",
+          description: 'Asset to sell — "TON" or a jetton master address',
+        },
+        to_asset: {
+          type: "string",
+          description: 'Asset to buy — "TON" or a jetton master address',
+        },
+        amount: {
+          type: "number",
+          description: "Total amount to swap in from_asset units",
+        },
+        max_splits: {
+          type: "integer",
+          description: "Maximum number of DEXes to split the trade across (default 2)",
+          minimum: 1,
+          maximum: 3,
+        },
+      },
+      required: ["from_asset", "to_asset", "amount"],
+    },
+    execute: async (params, _context) => {
+      const { from_asset, to_asset, amount, max_splits = 2 } = params;
+      try {
+        const dexList = ["stonfi", "dedust"];
+        const quoteParams = { fromAsset: from_asset, toAsset: to_asset, amount };
+
+        const [stonfiQuote, dedustQuote] = await Promise.all([
+          sdk.ton.dex.quoteSTONfi(quoteParams).catch(() => null),
+          sdk.ton.dex.quoteDeDust(quoteParams).catch(() => null),
+        ]);
+
+        const dexQuotes = [];
+        if (stonfiQuote) dexQuotes.push({ dex: "stonfi", output: parseFloat(stonfiQuote.output ?? stonfiQuote.price ?? 0), fee: 0.003 });
+        if (dedustQuote) dexQuotes.push({ dex: "dedust", output: parseFloat(dedustQuote.output ?? dedustQuote.price ?? 0), fee: 0.003 });
+
+        if (dexQuotes.length === 0) {
+          return { success: false, error: "No DEX quotes available for routing" };
+        }
+
+        // Sort by output descending to find best single-DEX route
+        dexQuotes.sort((a, b) => b.output - a.output);
+        const bestSingleDex = dexQuotes[0];
+
+        // Try 50/50 split if multiple DEXes available
+        let bestRoute = {
+          type: "single",
+          dex: bestSingleDex.dex,
+          total_output: bestSingleDex.output,
+          splits: [{ dex: bestSingleDex.dex, amount_in: amount, expected_output: bestSingleDex.output, percent: 100 }],
+        };
+
+        if (dexQuotes.length >= 2 && max_splits >= 2) {
+          // Calculate split quotes at half the amount
+          const halfAmount = amount / 2;
+          const [stonfiHalf, dedustHalf] = await Promise.all([
+            sdk.ton.dex.quoteSTONfi({ ...quoteParams, amount: halfAmount }).catch(() => null),
+            sdk.ton.dex.quoteDeDust({ ...quoteParams, amount: halfAmount }).catch(() => null),
+          ]);
+
+          if (stonfiHalf && dedustHalf) {
+            const splitOutput = parseFloat(stonfiHalf.output ?? stonfiHalf.price ?? 0) +
+              parseFloat(dedustHalf.output ?? dedustHalf.price ?? 0);
+
+            if (splitOutput > bestSingleDex.output * 1.001) { // only split if >0.1% better
+              bestRoute = {
+                type: "split",
+                total_output: splitOutput,
+                improvement_percent: parseFloat(((splitOutput - bestSingleDex.output) / bestSingleDex.output * 100).toFixed(4)),
+                splits: [
+                  { dex: "stonfi", amount_in: halfAmount, expected_output: parseFloat(stonfiHalf.output ?? stonfiHalf.price ?? 0), percent: 50 },
+                  { dex: "dedust", amount_in: halfAmount, expected_output: parseFloat(dedustHalf.output ?? dedustHalf.price ?? 0), percent: 50 },
+                ],
+              };
+            }
+          }
+        }
+
+        const savings = bestRoute.total_output - dexQuotes[dexQuotes.length - 1]?.output;
+
+        return {
+          success: true,
+          data: {
+            from_asset,
+            to_asset,
+            amount_in: amount,
+            best_route: bestRoute,
+            all_dex_quotes: dexQuotes,
+            savings_vs_worst: parseFloat(savings.toFixed(6)),
+            execution_note: bestRoute.type === "split"
+              ? `Split route: execute ${bestRoute.splits.map((s) => `${s.amount_in} on ${s.dex}`).join(" and ")} for best output`
+              : `Single-DEX route on ${bestRoute.dex} is optimal`,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_cross_dex_routing failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 38: ton_trading_get_best_price ────────────────────────────────────
+  {
+    name: "ton_trading_get_best_price",
+    description:
+      "Compare prices across STON.fi, DeDust, and TONCO to find the best execution price for a swap. Returns ranked results with estimated output, slippage, and fees for each DEX. Use before any trade to ensure best execution.",
+    category: "data-bearing",
+    parameters: {
+      type: "object",
+      properties: {
+        from_asset: {
+          type: "string",
+          description: 'Asset to sell — "TON" or a jetton master address',
+        },
+        to_asset: {
+          type: "string",
+          description: 'Asset to buy — "TON" or a jetton master address',
+        },
+        amount: {
+          type: "string",
+          description: 'Amount to quote in from_asset units (e.g. "1" for 1 TON)',
+        },
+      },
+      required: ["from_asset", "to_asset", "amount"],
+    },
+    execute: async (params, _context) => {
+      const { from_asset, to_asset, amount } = params;
+      try {
+        const cacheKey = `bestprice:${from_asset}:${to_asset}:${amount}`;
+        const cached = sdk.storage.get(cacheKey);
+        if (cached) return { success: true, data: cached };
+
+        const amountNum = parseFloat(amount);
+        const quoteParams = { fromAsset: from_asset, toAsset: to_asset, amount: amountNum };
+
+        const dexFees = { stonfi: 0.003, dedust: 0.003, tonco: 0.003 };
+
+        const [stonfiQuote, dedustQuote, toncoQuote] = await Promise.all([
+          sdk.ton.dex.quoteSTONfi(quoteParams).catch((err) => {
+            sdk.log.warn(`StonFi quote failed: ${err.message}`);
+            return null;
+          }),
+          sdk.ton.dex.quoteDeDust(quoteParams).catch((err) => {
+            sdk.log.warn(`DeDust quote failed: ${err.message}`);
+            return null;
+          }),
+          sdk.ton.dex.quoteTONCO
+            ? sdk.ton.dex.quoteTONCO(quoteParams).catch((err) => {
+                sdk.log.warn(`TONCO quote failed: ${err.message}`);
+                return null;
+              })
+            : Promise.resolve(null),
+        ]);
+
+        const results = [];
+
+        if (stonfiQuote) {
+          const output = parseFloat(stonfiQuote.output ?? stonfiQuote.price ?? 0);
+          const fee = amountNum * dexFees.stonfi;
+          results.push({
+            dex: "stonfi",
+            output_amount: output,
+            effective_price: output > 0 ? output / amountNum : null,
+            fee_amount: fee,
+            output_after_fee: output * (1 - dexFees.stonfi),
+          });
+        }
+
+        if (dedustQuote) {
+          const output = parseFloat(dedustQuote.output ?? dedustQuote.price ?? 0);
+          const fee = amountNum * dexFees.dedust;
+          results.push({
+            dex: "dedust",
+            output_amount: output,
+            effective_price: output > 0 ? output / amountNum : null,
+            fee_amount: fee,
+            output_after_fee: output * (1 - dexFees.dedust),
+          });
+        }
+
+        if (toncoQuote) {
+          const output = parseFloat(toncoQuote.output ?? toncoQuote.price ?? 0);
+          const fee = amountNum * dexFees.tonco;
+          results.push({
+            dex: "tonco",
+            output_amount: output,
+            effective_price: output > 0 ? output / amountNum : null,
+            fee_amount: fee,
+            output_after_fee: output * (1 - dexFees.tonco),
+          });
+        }
+
+        if (results.length === 0) {
+          return { success: false, error: "No DEX prices available" };
+        }
+
+        results.sort((a, b) => (b.output_after_fee ?? 0) - (a.output_after_fee ?? 0));
+        const best = results[0];
+        const worst = results[results.length - 1];
+        const savingsPercent = worst.output_after_fee > 0
+          ? ((best.output_after_fee - worst.output_after_fee) / worst.output_after_fee) * 100
+          : 0;
+
+        const data = {
+          from_asset,
+          to_asset,
+          amount_in: amount,
+          best_dex: best.dex,
+          best_output: parseFloat((best.output_after_fee ?? 0).toFixed(6)),
+          savings_vs_worst_percent: parseFloat(savingsPercent.toFixed(4)),
+          dex_comparison: results.map((r) => ({
+            dex: r.dex,
+            output_amount: parseFloat((r.output_amount ?? 0).toFixed(6)),
+            output_after_fee: parseFloat((r.output_after_fee ?? 0).toFixed(6)),
+            effective_price: r.effective_price != null ? parseFloat(r.effective_price.toFixed(6)) : null,
+            fee_amount: parseFloat(r.fee_amount.toFixed(6)),
+          })),
+          fetched_at: Date.now(),
+        };
+
+        sdk.storage.set(cacheKey, data, { ttl: 30_000 });
+        return { success: true, data };
+      } catch (err) {
+        sdk.log.error(`ton_trading_get_best_price failed: ${err.message}`);
         return { success: false, error: String(err.message).slice(0, 500) };
       }
     },

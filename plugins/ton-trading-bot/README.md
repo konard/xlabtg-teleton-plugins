@@ -36,6 +36,22 @@ Each tool does exactly one thing. The LLM composes them:
 20. ton_trading_get_optimal_position_size    → Kelly Criterion and fixed-fraction sizing
 21. ton_trading_schedule_trade               → store a pending trade for future execution
 22. ton_trading_get_scheduled_trades         → list pending scheduled trades
+23. ton_trading_reset_simulation_balance     → reset virtual balance to starting amount
+24. ton_trading_set_simulation_balance       → manually set the virtual balance
+25. ton_trading_set_take_profit              → standalone take-profit with optional trailing stop
+26. ton_trading_auto_execute                 → auto-execute trades when price triggers are met
+27. ton_trading_get_portfolio_summary        → portfolio overview with unrealized P&L
+28. ton_trading_rebalance_portfolio          → calculate rebalancing trades for target allocations
+29. ton_trading_get_technical_indicators     → RSI, MACD, Bollinger Bands for a token
+30. ton_trading_get_order_book_depth         → liquidity analysis and price impact
+31. ton_trading_create_schedule              → create recurring DCA or grid trading schedule
+32. ton_trading_cancel_schedule              → cancel one or more scheduled trades
+33. ton_trading_get_performance_dashboard    → real-time P&L, win rate, daily breakdown
+34. ton_trading_export_trades                → export trade history for external analysis
+35. ton_trading_dynamic_stop_loss            → volatility-adjusted stop-loss using ATR
+36. ton_trading_position_sizing              → optimal position size based on volatility
+37. ton_trading_cross_dex_routing            → optimal split routing across multiple DEXes
+38. ton_trading_get_best_price               → compare prices across STON.fi, DeDust, TONCO
 ```
 
 ## Tools
@@ -64,6 +80,22 @@ Each tool does exactly one thing. The LLM composes them:
 | `ton_trading_get_optimal_position_size` | Kelly Criterion and fixed-fraction position sizing | data-bearing |
 | `ton_trading_schedule_trade` | Store a pending trade for future execution | action |
 | `ton_trading_get_scheduled_trades` | List pending scheduled trades and flag due ones | data-bearing |
+| `ton_trading_reset_simulation_balance` | Reset the simulation balance to a starting amount | action |
+| `ton_trading_set_simulation_balance` | Manually set the simulation balance | action |
+| `ton_trading_set_take_profit` | Register standalone take-profit rule with optional trailing stop | action |
+| `ton_trading_auto_execute` | Auto-execute trades when price trigger conditions are met | action |
+| `ton_trading_get_portfolio_summary` | Comprehensive portfolio overview with unrealized P&L | data-bearing |
+| `ton_trading_rebalance_portfolio` | Calculate trades needed to hit target allocations | data-bearing |
+| `ton_trading_get_technical_indicators` | RSI, MACD, Bollinger Bands for a TON token pair | data-bearing |
+| `ton_trading_get_order_book_depth` | Order book depth, liquidity, and price impact analysis | data-bearing |
+| `ton_trading_create_schedule` | Create recurring DCA or grid trading schedule | action |
+| `ton_trading_cancel_schedule` | Cancel one or more scheduled (pending) trades | action |
+| `ton_trading_get_performance_dashboard` | Real-time P&L, win rate, and daily trade breakdown | data-bearing |
+| `ton_trading_export_trades` | Export trade history in structured format | data-bearing |
+| `ton_trading_dynamic_stop_loss` | Volatility-adjusted stop-loss using Average True Range | action |
+| `ton_trading_position_sizing` | Optimal position size based on volatility and conviction | data-bearing |
+| `ton_trading_cross_dex_routing` | Optimal split-routing plan across multiple DEXes | data-bearing |
+| `ton_trading_get_best_price` | Compare prices across STON.fi, DeDust, TONCO | data-bearing |
 
 ## Install
 
@@ -165,13 +197,139 @@ plugins:
 | `amount_out` | number | Yes | — | Actual amount received |
 | `note` | string | No | — | Optional note (e.g. exit reason) |
 
+### `ton_trading_set_take_profit`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `trade_id` | integer | Yes | — | Journal trade ID to protect |
+| `entry_price` | number | Yes | — | Price at which position was opened |
+| `take_profit_percent` | number | Yes | — | Profit % that triggers exit (e.g. 10 = +10%) |
+| `trailing_stop` | boolean | No | false | Enable trailing stop that locks in profits |
+| `trailing_stop_percent` | number | No | tp/2 | Trailing offset below peak price in % |
+
+### `ton_trading_auto_execute`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `from_asset` | string | Yes | — | Asset to sell |
+| `to_asset` | string | Yes | — | Asset to buy |
+| `amount` | number | Yes | — | Amount to trade when conditions are met |
+| `mode` | string | No | simulation | "real" or "simulation" |
+| `trigger_price_below` | number | No | — | Execute when price falls below this value |
+| `trigger_price_above` | number | No | — | Execute when price rises above this value |
+| `auto_close_at_profit_percent` | number | No | — | Auto-register take-profit rule after execution |
+| `auto_stop_loss_percent` | number | No | — | Auto-register stop-loss rule after execution |
+
+### `ton_trading_get_portfolio_summary`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | all | "real", "simulation", or "all" |
+
+### `ton_trading_rebalance_portfolio`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `target_allocations` | array | Yes | — | Array of `{asset, percent}` objects summing to 100 |
+| `mode` | string | No | real | "real" or "simulation" |
+
+### `ton_trading_get_technical_indicators`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `token_address` | string | Yes | — | Token address or "TON" |
+| `timeframe` | string | No | 1h | "1h", "4h", or "1d" |
+| `periods` | integer | No | 14 | Candles for RSI calculation (5–100) |
+
+### `ton_trading_get_order_book_depth`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `from_asset` | string | Yes | — | Asset to sell |
+| `to_asset` | string | Yes | — | Asset to buy |
+| `trade_amount` | number | No | — | Trade size to estimate price impact for |
+
+### `ton_trading_create_schedule`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `strategy` | string | Yes | — | "dca" or "grid" |
+| `from_asset` | string | Yes | — | Asset to sell |
+| `to_asset` | string | Yes | — | Asset to buy |
+| `amount_per_trade` | number | Yes | — | Amount per individual order |
+| `mode` | string | No | simulation | "real" or "simulation" |
+| `interval_hours` | number | No | 24 | Hours between DCA orders |
+| `num_orders` | integer | No | 5 | Number of orders to schedule |
+
+### `ton_trading_cancel_schedule`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `schedule_id` | integer | No | — | Specific schedule ID to cancel |
+| `from_asset` | string | No | — | Cancel all pending trades for this from_asset |
+| `to_asset` | string | No | — | Cancel all pending trades for this to_asset |
+
+### `ton_trading_get_performance_dashboard`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | all | "real", "simulation", or "all" |
+| `days` | integer | No | 30 | Days to include in the report (1–365) |
+
+### `ton_trading_export_trades`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | all | "real", "simulation", or "all" |
+| `status` | string | No | all | "open", "closed", or "all" |
+| `days` | integer | No | — | Limit to last N days |
+| `limit` | integer | No | 200 | Max records (1–1000) |
+
+### `ton_trading_dynamic_stop_loss`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `trade_id` | integer | Yes | — | Journal trade ID to protect |
+| `token_address` | string | Yes | — | Token address for volatility data |
+| `entry_price` | number | Yes | — | Price at which position was opened |
+| `atr_multiplier` | number | No | 2.0 | Multiplier applied to ATR for stop distance |
+| `max_stop_loss_percent` | number | No | 15 | Maximum stop-loss regardless of volatility |
+| `take_profit_atr_multiplier` | number | No | — | Optional take-profit at N× ATR above entry |
+
+### `ton_trading_position_sizing`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `token_address` | string | Yes | — | Token address for volatility data |
+| `stop_loss_percent` | number | Yes | — | Planned stop-loss for this trade |
+| `mode` | string | No | simulation | "real" or "simulation" |
+| `risk_per_trade_percent` | number | No | 2 | Max portfolio % to risk per trade |
+| `conviction_level` | string | No | medium | "low" (0.5×), "medium" (1×), or "high" (1.5×) |
+
+### `ton_trading_cross_dex_routing`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `from_asset` | string | Yes | — | Asset to sell |
+| `to_asset` | string | Yes | — | Asset to buy |
+| `amount` | number | Yes | — | Total amount to swap |
+| `max_splits` | integer | No | 2 | Maximum DEXes to split across (1–3) |
+
+### `ton_trading_get_best_price`
+
+| Param | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `from_asset` | string | Yes | — | Asset to sell |
+| `to_asset` | string | Yes | — | Asset to buy |
+| `amount` | string | Yes | — | Amount to quote |
+
 ## Risk Management
 
 Risk parameters are enforced by `ton_trading_validate_trade` before any trade:
 
 - **maxTradePercent** (default 10%) — no single trade can exceed this percentage of the balance
 - **minBalanceTON** (default 1 TON) — trading blocked if balance falls below this floor
-- **scope: dm-only** on `ton_trading_execute_swap` — real trades only in direct messages
+- **scope: dm-only** on `ton_trading_execute_swap` and `ton_trading_auto_execute` — real trades only in direct messages
 
 The LLM reads the validation result and decides whether to proceed.
 
@@ -179,6 +337,8 @@ The LLM reads the validation result and decides whether to proceed.
 
 - `trade_journal` — every executed and simulated trade with PnL
 - `sim_balance` — virtual balance history for paper trading
+- `stop_loss_rules` — active stop-loss and take-profit rules per trade
+- `scheduled_trades` — pending trades for future or scheduled execution
 
 ## Legal Disclaimer
 
