@@ -62,7 +62,7 @@ describe("composio-direct Teleton integration", () => {
     const sdk = makeSdk();
     const toolList = toolsFactory(sdk);
 
-    assert.equal(manifest.version, "1.3.0");
+    assert.equal(manifest.version, "1.4.0");
     assert.equal(manifest.defaultConfig.base_url, "https://backend.composio.dev/api/v3.1");
     assert.equal(toolList.length, 4);
     assert.deepEqual(
@@ -167,6 +167,121 @@ describe("composio-direct Teleton integration", () => {
         arguments: { owner: "xlabtg" },
         version: "latest",
       });
+    } finally {
+      restore();
+    }
+  });
+
+  it("passes connected_account_id in HTTP body when provided", async () => {
+    const { calls, restore } = mockFetch(() => ({
+      status: 200,
+      data: {
+        successful: true,
+        data: { price: 42000 },
+      },
+    }));
+
+    try {
+      const executeTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        {
+          tool_slug: "COINMARKETCAP_CRYPTOCURRENCY_LISTINGS_LATEST",
+          parameters: {},
+          connected_account_id: "ca_lc9TestLuaI",
+        },
+        makeContext({ senderId: "user-42" })
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(calls[0].body.connected_account_id, "ca_lc9TestLuaI");
+      assert.equal(calls[0].body.user_id, "user-42");
+    } finally {
+      restore();
+    }
+  });
+
+  it("detects auth_required in 200 response data and returns structured auth error", async () => {
+    const { restore } = mockFetch(() => ({
+      status: 200,
+      data: {
+        successful: true,
+        data: {
+          auth_required: true,
+          connect_url: "https://connect.composio.dev/link/ln_abc",
+        },
+      },
+    }));
+
+    try {
+      const executeTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        {
+          tool_slug: "COINMARKETCAP_CRYPTOCURRENCY_LISTINGS_LATEST",
+          parameters: {},
+          connected_account_id: "ca_lc9TestLuaI",
+        },
+        makeContext()
+      );
+
+      assert.equal(result.success, false);
+      assert.equal(result.error, "auth_required");
+      assert.equal(result.auth.service, "coinmarketcap");
+      assert.equal(result.auth.connect_url, "https://connect.composio.dev/link/ln_abc");
+      assert.ok(result.auth.message.includes("COINMARKETCAP"));
+    } finally {
+      restore();
+    }
+  });
+
+  it("detects auth_required at top level of 200 response", async () => {
+    const { restore } = mockFetch(() => ({
+      status: 200,
+      data: {
+        auth_required: true,
+        connect_url: "https://connect.composio.dev/link/ln_xyz",
+      },
+    }));
+
+    try {
+      const executeTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        { tool_slug: "GEMINI_GENERATE_IMAGE", parameters: {} },
+        makeContext()
+      );
+
+      assert.equal(result.success, false);
+      assert.equal(result.error, "auth_required");
+      assert.equal(result.auth.service, "gemini");
+      assert.equal(result.auth.connect_url, "https://connect.composio.dev/link/ln_xyz");
+    } finally {
+      restore();
+    }
+  });
+
+  it("passes connected_account_id in multi_execute HTTP body", async () => {
+    const { calls, restore } = mockFetch(() => ({
+      status: 200,
+      data: { successful: true, data: { ok: true } },
+    }));
+
+    try {
+      const multiTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_multi_execute");
+      const result = await multiTool.execute(
+        {
+          executions: [
+            {
+              tool_slug: "COINMARKETCAP_CRYPTOCURRENCY_LISTINGS_LATEST",
+              parameters: {},
+              connected_account_id: "ca_multi_test",
+            },
+          ],
+        },
+        makeContext()
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.data.results[0].success, true);
+      assert.equal(calls[0].body.connected_account_id, "ca_multi_test");
     } finally {
       restore();
     }

@@ -91,7 +91,7 @@ async function getComposioSdk(apiKey) {
 
 export const manifest = {
   name: "composio-direct",
-  version: "1.3.0",
+  version: "1.4.0",
   sdkVersion: ">=1.0.0",
   description:
     "Direct access to 1000+ Composio automation tools — search, execute, batch-run, and authorize services like GitHub, Gmail, Slack, Notion, Jira, Linear without MCP transport",
@@ -215,6 +215,7 @@ async function fetchWithRetry({ url, method, headers, body, timeoutMs, log }) {
  */
 function isAuthError(response) {
   if (response.status === 401 || response.status === 403) return true;
+  if (isAuthRequiredPayload(response.data)) return true;
   const msg = getComposioMessage(response.data).toLowerCase();
   if (msg) {
     return (
@@ -227,6 +228,38 @@ function isAuthError(response) {
     );
   }
   return false;
+}
+
+/**
+ * Detect if a Composio response payload contains an auth_required flag,
+ * even when the HTTP status is 200 and successful may be true.
+ * @param {unknown} data
+ * @returns {boolean}
+ */
+function isAuthRequiredPayload(data) {
+  if (!isRecord(data)) return false;
+  if (data.auth_required === true || data.authRequired === true) return true;
+  const inner = data.data ?? data.response ?? data.result;
+  if (isRecord(inner)) {
+    return inner.auth_required === true || inner.authRequired === true;
+  }
+  return false;
+}
+
+/**
+ * Extract connect_url from a Composio response payload that signals auth_required.
+ * @param {unknown} data
+ * @returns {string | null}
+ */
+function extractConnectUrl(data) {
+  if (!isRecord(data)) return null;
+  const url = data.connect_url ?? data.connectUrl ?? data.redirect_url ?? data.redirectUrl;
+  if (typeof url === "string" && url.length > 0) return url;
+  const inner = data.data ?? data.response ?? data.result;
+  if (isRecord(inner)) {
+    return inner.connect_url ?? inner.connectUrl ?? inner.redirect_url ?? inner.redirectUrl ?? null;
+  }
+  return null;
 }
 
 /**
@@ -745,14 +778,29 @@ export const tools = (sdk) => {
             execBody
           );
 
+          const resultData = result?.data ?? result;
+          if (isAuthRequiredPayload(result) || isAuthRequiredPayload(resultData)) {
+            const service = extractServiceFromSlug(params.tool_slug);
+            const connectUrl = extractConnectUrl(result) || extractConnectUrl(resultData) || buildConnectUrl(baseUrl, apiKey, service, context);
+            sdk.log.info(`composio_execute_tool: auth required for ${service} (SDK response)`);
+            return {
+              success: false,
+              error: "auth_required",
+              auth: {
+                service,
+                connect_url: connectUrl,
+                message: `Authorization required for ${service.toUpperCase()}. Call composio_auth_link for a fresh connection link.`,
+              },
+            };
+          }
+
           sdk.log.info(`composio_execute_tool: ${params.tool_slug} succeeded (SDK)`);
           return {
             success: true,
-            data: result?.data ?? result,
+            data: resultData,
           };
         } catch (err) {
           const errMsg = formatApiError(err);
-          // Detect auth errors from SDK exceptions
           if (err?.status === 401 || err?.status === 403 ||
               errMsg.toLowerCase().includes("auth") ||
               errMsg.toLowerCase().includes("connect") ||
@@ -802,7 +850,7 @@ export const tools = (sdk) => {
 
         if (isAuthError(response)) {
           const service = extractServiceFromSlug(params.tool_slug);
-          const connectUrl = buildConnectUrl(baseUrl, apiKey, service, context);
+          const connectUrl = extractConnectUrl(response.data) || buildConnectUrl(baseUrl, apiKey, service, context);
           sdk.log.info(`composio_execute_tool: auth required for ${service}`);
           return {
             success: false,
@@ -978,10 +1026,28 @@ export const tools = (sdk) => {
                 execBody
               );
 
+              const resultData = result?.data ?? result;
+              if (isAuthRequiredPayload(result) || isAuthRequiredPayload(resultData)) {
+                const service = extractServiceFromSlug(exec.tool_slug);
+                const connectUrl = extractConnectUrl(result) || extractConnectUrl(resultData) || buildConnectUrl(baseUrl, apiKey, service, context);
+                results[globalIdx] = {
+                  tool_slug: normalizedSlug,
+                  success: false,
+                  error: "auth_required",
+                  auth: {
+                    service,
+                    connect_url: connectUrl,
+                    message: `Authorization required for ${service.toUpperCase()}. Call composio_auth_link for a fresh connection link.`,
+                  },
+                };
+                if (failFast) stopped = true;
+                return;
+              }
+
               results[globalIdx] = {
                 tool_slug: normalizedSlug,
                 success: true,
-                data: result?.data ?? result,
+                data: resultData,
               };
               return;
             } catch (err) {
@@ -1038,7 +1104,7 @@ export const tools = (sdk) => {
 
             if (isAuthError(response)) {
               const service = extractServiceFromSlug(exec.tool_slug);
-              const connectUrl = buildConnectUrl(baseUrl, apiKey, service, context);
+              const connectUrl = extractConnectUrl(response.data) || buildConnectUrl(baseUrl, apiKey, service, context);
               const result = {
                 tool_slug: normalizedSlug,
                 success: false,
