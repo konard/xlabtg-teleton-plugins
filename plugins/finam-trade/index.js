@@ -1,5 +1,6 @@
 import { FinamAuth } from "./src/auth.js";
 import { FinamClient } from "./src/client.js";
+import { FinamGrpcJwtRenewal } from "./src/grpc.js";
 import { accountTools } from "./src/tools/accounts.js";
 import { instrumentTools } from "./src/tools/instruments.js";
 import { marketTools } from "./src/tools/market.js";
@@ -56,6 +57,7 @@ export const manifest = {
   defaultConfig: {
     api_base: "https://api.finam.ru",
     grpc_base: "api.finam.ru:443",
+    enable_grpc_jwt_renewal: false,
     rate_limit_rps: 3,
     rate_limit_per_minute: 200,
     timeout_ms: 30000,
@@ -66,6 +68,8 @@ export const manifest = {
   repository: "https://github.com/TONresistor/teleton-plugins",
   funding: null,
 };
+
+let activeRuntime = null;
 
 export function migrate(db) {
   db.exec(`
@@ -78,20 +82,7 @@ export function migrate(db) {
 }
 
 export const tools = (sdk) => {
-  const config = { ...manifest.defaultConfig, ...(sdk?.pluginConfig ?? {}) };
-  const apiBase = config.api_base ?? manifest.defaultConfig.api_base;
-  const rateLimitPerMinute = resolveRateLimit(config);
-  const timeoutMs = Number(config.timeout_ms ?? 30000);
-  const auth = new FinamAuth({ sdk, apiBase, timeoutMs });
-  const client = new FinamClient({
-    sdk,
-    auth,
-    apiBase,
-    rateLimitPerMinute,
-    timeoutMs,
-  });
-  const cacheTtlMs = Number(config.cache_ttl_seconds ?? 3600) * 1000;
-  const deps = { sdk, auth, client, cacheTtlMs };
+  const deps = getRuntime(sdk);
 
   return [
     ...accountTools(deps),
@@ -102,11 +93,47 @@ export const tools = (sdk) => {
   ];
 };
 
-export function start(ctx) {
+export async function start(ctx) {
+  const deps = getRuntime(ctx?.sdk);
+  if (isEnabled(deps.config.enable_grpc_jwt_renewal)) {
+    try {
+      await deps.auth.startJwtRenewal();
+      ctx?.sdk?.log?.info?.("finam-trade gRPC JWT renewal stream enabled");
+    } catch (err) {
+      ctx?.sdk?.log?.warn?.(`finam-trade gRPC JWT renewal unavailable: ${err?.message ?? String(err)}`);
+    }
+  }
   ctx?.sdk?.log?.info?.("finam-trade plugin ready");
 }
 
-export function stop() {}
+export function stop() {
+  activeRuntime?.auth?.stopJwtRenewal?.();
+  activeRuntime = null;
+}
+
+function getRuntime(sdk) {
+  if (activeRuntime?.sdk === sdk) return activeRuntime;
+  activeRuntime?.auth?.stopJwtRenewal?.();
+
+  const config = { ...manifest.defaultConfig, ...(sdk?.pluginConfig ?? {}) };
+  const apiBase = config.api_base ?? manifest.defaultConfig.api_base;
+  const rateLimitPerMinute = resolveRateLimit(config);
+  const timeoutMs = Number(config.timeout_ms ?? 30000);
+  const grpcRenewal = isEnabled(config.enable_grpc_jwt_renewal)
+    ? new FinamGrpcJwtRenewal({ sdk, grpcBase: config.grpc_base })
+    : null;
+  const auth = new FinamAuth({ sdk, apiBase, timeoutMs, grpcRenewal });
+  const client = new FinamClient({
+    sdk,
+    auth,
+    apiBase,
+    rateLimitPerMinute,
+    timeoutMs,
+  });
+  const cacheTtlMs = Number(config.cache_ttl_seconds ?? 3600) * 1000;
+  activeRuntime = { sdk, config, auth, client, cacheTtlMs };
+  return activeRuntime;
+}
 
 function resolveRateLimit(config) {
   const perMinute = Number(config.rate_limit_per_minute);
@@ -116,4 +143,8 @@ function resolveRateLimit(config) {
   if (Number.isFinite(rps) && rps > 0) return Math.min(200, Math.floor(rps * 60));
 
   return 200;
+}
+
+function isEnabled(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
 }

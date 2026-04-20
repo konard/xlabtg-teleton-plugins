@@ -11,6 +11,7 @@ export class FinamAuth {
     now = Date.now,
     refreshSkewMs = DEFAULT_REFRESH_SKEW_MS,
     timeoutMs = 30_000,
+    grpcRenewal = null,
   } = {}) {
     assertSafeHttpsUrl(apiBase);
     this.sdk = sdk ?? {};
@@ -19,6 +20,7 @@ export class FinamAuth {
     this.now = now;
     this.refreshSkewMs = refreshSkewMs;
     this.timeoutMs = timeoutMs;
+    this.grpcRenewal = grpcRenewal;
     this.token = null;
     this.tokenExpiresAt = 0;
   }
@@ -37,9 +39,7 @@ export class FinamAuth {
     const data = await this.postJson("/v1/sessions", { secret });
     if (!data?.token) throw new Error("Finam auth response did not include a token.");
 
-    this.token = data.token;
-    this.tokenExpiresAt = parseJwtExpiration(data.token) ?? (this.now() + FALLBACK_TOKEN_TTL_MS);
-    return this.token;
+    return this.setToken(data.token);
   }
 
   async getTokenDetails() {
@@ -60,6 +60,28 @@ export class FinamAuth {
       throw new Error("FINAM_SECRET is required. Add a Finam API secret to Teleton secrets.");
     }
     return secret;
+  }
+
+  async startJwtRenewal() {
+    if (!this.grpcRenewal) return false;
+    const secret = await this.requireSecret();
+    return this.grpcRenewal.start({
+      secret,
+      onToken: (token) => {
+        this.setToken(token);
+        this.sdk?.log?.debug?.("Finam gRPC JWT renewal stream supplied a fresh token.");
+      },
+    });
+  }
+
+  stopJwtRenewal() {
+    this.grpcRenewal?.stop?.();
+  }
+
+  setToken(token) {
+    this.token = token;
+    this.tokenExpiresAt = parseJwtExpiration(token) ?? (this.now() + FALLBACK_TOKEN_TTL_MS);
+    return this.token;
   }
 
   async postJson(path, body) {

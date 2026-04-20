@@ -58,4 +58,9 @@ test("assertSafeHttpsUrl rejects non-HTTPS and local network targets", () => {
   assertSafeHttpsUrl("https://api.finam.ru");
   assert.throws(() => assertSafeHttpsUrl("http://api.finam.ru"), /HTTPS/);
   assert.throws(() => assertSafeHttpsUrl("https://localhost"), /local/i);
+  assert.throws(() => assertSafeHttpsUrl("https://[::1]"), /local|private/i);
+  assert.throws(() => assertSafeHttpsUrl("https://[fc00::1]"), /local|private/i);
+  assert.throws(() => assertSafeHttpsUrl("https://[fd00::1]"), /local|private/i);
+  assert.throws(() => assertSafeHttpsUrl("https://[fe80::1]"), /local|private/i);
+  assert.throws(() => assertSafeHttpsUrl("https://[::ffff:127.0.0.1]"), /local|private/i);
 });

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { FinamAuth } from "../src/auth.js";
+import { FinamGrpcJwtRenewal } from "../src/grpc.js";
 
 function jwtWithExp(exp) {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -82,4 +84,67 @@ test("FinamAuth fetches token details without exposing the secret", async () => 
   assert.deepEqual(details.account_ids, ["ACC1"]);
   assert.equal(requests[1].url, "https://api.finam.ru/v1/sessions/details");
   assert.deepEqual(JSON.parse(requests[1].init.body), { token });
+});
+
+test("FinamAuth can accept fresh JWTs from the gRPC renewal stream", async () => {
+  const stream = new EventEmitter();
+  let cancelled = false;
+  stream.cancel = () => {
+    cancelled = true;
+  };
+
+  const calls = [];
+  class AuthService {
+    constructor(target, credentials) {
+      calls.push(["client", target, credentials]);
+    }
+
+    SubscribeJwtRenewal(request) {
+      calls.push(["subscribe", request]);
+      return stream;
+    }
+
+    close() {
+      calls.push(["close"]);
+    }
+  }
+
+  const fakeGrpc = {
+    credentials: {
+      createSsl: () => "ssl-credentials",
+    },
+    loadPackageDefinition: () => ({
+      grpc: { tradeapi: { v1: { auth: { AuthService } } } },
+    }),
+  };
+  const fakeProtoLoader = {
+    loadSync: (protoPath, options) => {
+      calls.push(["load", protoPath, options.keepCase]);
+      return {};
+    },
+  };
+  const token = jwtWithExp(2_000);
+  const auth = new FinamAuth({
+    sdk: createSdk(),
+    now: () => 1_000_000,
+    fetchImpl: async () => {
+      throw new Error("REST auth should not be called when the gRPC token is fresh.");
+    },
+    grpcRenewal: new FinamGrpcJwtRenewal({
+      grpcBase: "api.finam.ru:443",
+      grpcLib: fakeGrpc,
+      protoLoaderLib: fakeProtoLoader,
+    }),
+  });
+
+  assert.equal(await auth.startJwtRenewal(), true);
+  stream.emit("data", { token });
+
+  assert.equal(await auth.getToken(), token);
+  assert.deepEqual(calls[1], ["client", "api.finam.ru:443", "ssl-credentials"]);
+  assert.deepEqual(calls[2], ["subscribe", { secret: "test-secret" }]);
+
+  auth.stopJwtRenewal();
+  assert.equal(cancelled, true);
+  assert.deepEqual(calls.at(-1), ["close"]);
 });

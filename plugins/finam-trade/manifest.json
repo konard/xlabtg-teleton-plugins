@@ -21,6 +21,7 @@
   "defaultConfig": {
     "api_base": "https://api.finam.ru",
     "grpc_base": "api.finam.ru:443",
+    "enable_grpc_jwt_renewal": false,
     "rate_limit_rps": 3,
     "rate_limit_per_minute": 200,
     "timeout_ms": 30000,

@@ -232,23 +232,65 @@ export function assertSafeHttpsUrl(input) {
   if (url.protocol !== "https:") throw new Error("Finam API base URL must use HTTPS.");
   if (url.username || url.password) throw new Error("Finam API base URL must not include credentials.");
 
-  const host = url.hostname.toLowerCase();
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
     throw new Error("Finam API base URL must not point to a local host.");
   }
 
-  const parts = host.split(".").map((part) => Number(part));
-  if (parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
-    const [a, b] = parts;
-    const isPrivate =
-      a === 10 ||
-      a === 127 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      a === 0;
-    if (isPrivate) throw new Error("Finam API base URL must not point to a local or private network.");
+  if (isPrivateIpv4(parseIpv4Parts(host)) || isPrivateIpv6(host)) {
+    throw new Error("Finam API base URL must not point to a local or private network.");
   }
+}
+
+function parseIpv4Parts(host) {
+  const parts = host.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || !parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)) {
+    return null;
+  }
+  return parts;
+}
+
+function isPrivateIpv4(parts) {
+  if (!parts) return false;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    a === 0
+  );
+}
+
+function isPrivateIpv6(host) {
+  if (!host.includes(":")) return false;
+  if (host === "::" || host === "::1") return true;
+
+  const first = Number.parseInt(host.split(":").find(Boolean) ?? "", 16);
+  if (Number.isInteger(first)) {
+    if (first >= 0xfc00 && first <= 0xfdff) return true;
+    if (first >= 0xfe80 && first <= 0xfebf) return true;
+  }
+
+  const mappedIpv4 = parseIpv4MappedIpv6(host);
+  return isPrivateIpv4(mappedIpv4);
+}
+
+function parseIpv4MappedIpv6(host) {
+  if (!host.startsWith("::ffff:")) return null;
+  const tail = host.slice("::ffff:".length);
+  const ipv4Parts = parseIpv4Parts(tail);
+  if (ipv4Parts) return ipv4Parts;
+
+  const hextets = tail.split(":").filter(Boolean);
+  if (hextets.length !== 2) return null;
+
+  const high = Number.parseInt(hextets[0], 16);
+  const low = Number.parseInt(hextets[1], 16);
+  if (![high, low].every((part) => Number.isInteger(part) && part >= 0 && part <= 0xffff)) return null;
+
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff];
 }
 
 export function buildUrl(apiBase, path, query = {}) {

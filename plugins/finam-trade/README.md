@@ -2,7 +2,7 @@
 
 Finam Trade Pro exposes Finam Trade API account, trading, market-data, instrument, report, and usage tools to Teleton.
 
-The plugin uses the REST API documented at `https://tradeapi.finam.ru/docs/rest/`, requests a short-lived JWT through `POST /v1/sessions`, and refreshes that JWT before expiry. It uses native Node `fetch`, so no runtime packages are required.
+The plugin uses the REST API documented at `https://tradeapi.finam.ru/docs/rest/`, requests a short-lived JWT through `POST /v1/sessions`, and refreshes that JWT before expiry. It can also opt into Finam's gRPC `SubscribeJwtRenewal` stream for JWT renewal.
 
 ## Setup
 
@@ -16,6 +16,7 @@ Optional plugin config:
 {
   "api_base": "https://api.finam.ru",
   "grpc_base": "api.finam.ru:443",
+  "enable_grpc_jwt_renewal": false,
   "rate_limit_rps": 3,
   "rate_limit_per_minute": 200,
   "timeout_ms": 30000,
@@ -28,8 +29,10 @@ Optional plugin config:
 - Secrets are loaded only through `sdk.secrets.require("FINAM_SECRET")` with fallback to `sdk.secrets.get` for older runtimes.
 - Tokens and secrets are never logged by the plugin.
 - The client only accepts HTTPS API base URLs and rejects localhost/private-network targets.
+- IPv4 and IPv6 localhost/private API targets are rejected before requests are created.
 - Requests are limited to at most 200 per minute. The default config uses 3 requests per second, which is below that limit.
 - `401` and `403` responses clear the cached JWT and retry once with a fresh session token.
+- When `enable_grpc_jwt_renewal` is true, `grpc_base` is used only for Finam's authenticated JWT renewal stream.
 
 ## Tools
 
@@ -102,6 +105,8 @@ Place a limit order:
 }
 ```
 
+The plugin maps order decimals to Finam REST `Decimal` objects, for example `"quantity": { "value": "10" }`, matching the current `PlaceOrder` and `PlaceSLTPOrder` REST docs.
+
 Get daily bars:
 
 ```json
@@ -140,6 +145,6 @@ or:
 
 Network failures, API errors, validation errors, and missing secrets are converted to `success: false` results for the LLM.
 
-## Notes
+## REST And gRPC Scope
 
-The current implementation exposes Finam's REST operations as Teleton tools. `grpc_base` is retained in configuration for compatibility with the requested plugin shape and future streaming extensions.
+The current Teleton tools expose Finam's REST request/response operations. The gRPC integration is implemented for `AuthService.SubscribeJwtRenewal`, which is the gRPC-specific token renewal stream recommended by the Finam docs. Market, account, order, and report streaming subscriptions are not exposed as Teleton tools yet.
