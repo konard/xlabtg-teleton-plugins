@@ -33,12 +33,7 @@ jobs:
           for pkg in plugins/*/package.json; do
             dir=$(dirname "$pkg")
             # Only require package-lock.json when the plugin declares actual npm dependencies
-            has_deps=$(node -e "
-              const p = require('$pkg');
-              const has = Object.keys(p.dependencies || {}).length > 0 ||
-                          Object.keys(p.devDependencies || {}).length > 0;
-              process.stdout.write(has ? 'yes' : 'no');
-            ")
+            has_deps=$(node -e "const p=require(require('path').resolve('$pkg'));process.stdout.write((Object.keys(p.dependencies||{}).length>0||Object.keys(p.devDependencies||{}).length>0)?'yes':'no')")
             if [ "$has_deps" = "yes" ] && [ ! -f "$dir/package-lock.json" ]; then
               echo "::error file=$pkg::Missing package-lock.json alongside package.json (plugin has npm dependencies)"
               exit_code=1
