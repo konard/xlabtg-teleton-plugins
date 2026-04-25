@@ -1,0 +1,7 @@
+{
+  "name": "teleton-plugin-deezer",
+  "type": "module",
+  "version": "1.0.1",
+  "private": true,
+  "description": "Teleton plugin for @DeezerMusicBot inline music search"
+}
