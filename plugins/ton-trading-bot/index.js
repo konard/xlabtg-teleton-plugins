@@ -492,21 +492,34 @@ async function recordRealSwap(sdk, { from_asset, to_asset, amount, slippage, dex
   const resolvedEntryPrice =
     toFiniteNumber(entry_price_usd) ?? (await inferAssetPriceUsd(sdk, from_asset));
 
-  const tradeId = sdk.db
-    .prepare(
-      `INSERT INTO trade_journal
-       (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
-       VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
-    )
-    .run(
-      Date.now(),
-      from_asset,
-      to_asset,
-      parseFloat(amount),
-      result?.expectedOutput ? parseFloat(result.expectedOutput) : null,
-      resolvedEntryPrice ?? null
-    )
-    .lastInsertRowid;
+  let tradeId;
+  try {
+    tradeId = sdk.db
+      .prepare(
+        `INSERT INTO trade_journal
+         (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
+         VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
+      )
+      .run(
+        Date.now(),
+        from_asset,
+        to_asset,
+        parseFloat(amount),
+        result?.expectedOutput ? parseFloat(result.expectedOutput) : null,
+        resolvedEntryPrice ?? null
+      )
+      .lastInsertRowid;
+  } catch (journalErr) {
+    // The on-chain swap has already moved real funds; a failure to record it
+    // must be loud so the operator can reconcile the position manually instead
+    // of the trade silently vanishing from the journal (issue #182).
+    sdk.log.error(
+      `CRITICAL: real swap executed on-chain (${amount} ${from_asset} → ${to_asset}` +
+        `${result?.dex ? ` via ${result.dex}` : ""}) but writing the trade journal FAILED: ` +
+        `${journalErr.message}. Funds moved WITHOUT a trade_journal record — reconcile manually.`
+    );
+    throw journalErr;
+  }
 
   sdk.log.info(
     `Swap executed #${tradeId}: ${amount} ${from_asset} → ${to_asset} via ${result?.dex ?? dex ?? "best"}`
@@ -3228,7 +3241,7 @@ export const tools = (sdk) => [
       },
       required: ["from_asset", "to_asset", "amount"],
     },
-    execute: async (params, _context) => {
+    execute: async (params, context) => {
       const {
         from_asset, to_asset, amount, mode = "simulation",
         trigger_price_below, trigger_price_above,
@@ -3289,93 +3302,86 @@ export const tools = (sdk) => [
           };
         }
 
-        // ── Risk validation (same rules as ton_trading_validate_trade) ──────────
+        // ── Risk cap ────────────────────────────────────────────────────────────
+        // The %-of-balance cap and minimum-reserve checks are denominated in TON,
+        // so they apply when selling TON (in both modes). A jetton amount is not
+        // directly comparable to the TON balance, so a TON sell is the only case
+        // the cap can evaluate; non-TON real sells are still guarded downstream by
+        // recordRealSwap (wallet-initialized check + on-chain slippage). Before
+        // this, the checks were silently skipped for every non-TON asset and, in
+        // real mode, the post-trade reserve check was missing entirely (issue #182).
         const maxTradePercent = sdk.pluginConfig.maxTradePercent ?? 10;
         const minBalanceTON = sdk.pluginConfig.minBalanceTON ?? 1;
 
-        if (mode === "simulation" && from_asset === "TON") {
-          const simBalance = getSimBalance(sdk);
-          const maxAllowed = simBalance * (maxTradePercent / 100);
-          if (simBalance < minBalanceTON) {
+        if (from_asset === "TON") {
+          const isReal = mode === "real";
+          const balance = isReal
+            ? parseFloat((await sdk.ton.getBalance())?.balance ?? "0")
+            : getSimBalance(sdk);
+          const label = isReal ? "Wallet" : "Simulation";
+          const noun = isReal ? "balance" : "simulation balance";
+          const maxAllowed = balance * (maxTradePercent / 100);
+          if (balance < minBalanceTON) {
             return {
               success: false,
-              error: `Simulation balance (${simBalance} TON) is below minimum (${minBalanceTON} TON)`,
+              error: `${label} balance (${balance} TON) is below minimum (${minBalanceTON} TON)`,
             };
           }
           if (amount > maxAllowed) {
             return {
               success: false,
-              error: `Amount ${amount} TON exceeds ${maxTradePercent}% of simulation balance (max ${maxAllowed.toFixed(4)} TON)`,
+              error: `Amount ${amount} TON exceeds ${maxTradePercent}% of ${noun} (max ${maxAllowed.toFixed(4)} TON)`,
             };
           }
-          if (simBalance - amount < minBalanceTON) {
+          if (balance - amount < minBalanceTON) {
             return {
               success: false,
-              error: `Trade would bring simulation balance below minimum (${minBalanceTON} TON)`,
-            };
-          }
-        } else if (mode === "real" && from_asset === "TON") {
-          const realBalance = parseFloat((await sdk.ton.getBalance())?.balance ?? "0");
-          const maxAllowed = realBalance * (maxTradePercent / 100);
-          if (realBalance < minBalanceTON) {
-            return {
-              success: false,
-              error: `Wallet balance (${realBalance} TON) is below minimum (${minBalanceTON} TON)`,
-            };
-          }
-          if (amount > maxAllowed) {
-            return {
-              success: false,
-              error: `Amount ${amount} TON exceeds ${maxTradePercent}% of balance (max ${maxAllowed.toFixed(4)} TON)`,
+              error: `Trade would bring ${noun} below minimum (${minBalanceTON} TON)`,
             };
           }
         }
 
-        // Execute the trade
-        let tradeResult;
-        if (mode === "simulation") {
-          const expectedOut = dexQuote?.recommended
-            ? parseFloat(dexQuote[dexQuote.recommended]?.output ?? dexQuote[dexQuote.recommended]?.price ?? 0)
-            : amount;
+        // ── Execute via the shared helpers so auto_execute, execute_swap and
+        //    execute_scheduled_trade share identical swap + journal semantics:
+        //    the wallet-initialized check, a unit-safe inferred entry price, and
+        //    (real) the throw-on-post-chain-failure contract that prevents an
+        //    unsafe auto-retry. Previously this path re-implemented the swap and
+        //    INSERT inline, so non-TON real sells skipped the wallet check and
+        //    the entry-price inference drifted from the rest of the plugin. ──
+        const expectedOut = dexQuote?.recommended
+          ? parseFloat(dexQuote[dexQuote.recommended]?.output ?? dexQuote[dexQuote.recommended]?.price ?? 0)
+          : amount;
 
-          const tradeId = sdk.db
-            .prepare(
-              `INSERT INTO trade_journal
-               (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status, note)
-               VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, ?, 'open', 'auto_execute')`
-            )
-            .run(Date.now(), from_asset, to_asset, amount, expectedOut, resolvedEntryPriceUsd ?? null, null)
-            .lastInsertRowid;
+        const swapResult =
+          mode === "simulation"
+            ? await recordSimulatedSwap(sdk, {
+                from_asset,
+                to_asset,
+                amount_in: amount,
+                expected_amount_out: expectedOut,
+                note: "auto_execute",
+                entry_price_usd: resolvedEntryPriceUsd,
+              })
+            : await recordRealSwap(
+                sdk,
+                { from_asset, to_asset, amount, slippage, entry_price_usd: resolvedEntryPriceUsd },
+                context
+              );
 
-          if (from_asset === "TON") {
-            const simBalance = getSimBalance(sdk);
-            setSimBalance(sdk, simBalance - amount);
-          }
-
-          tradeResult = { trade_id: tradeId, mode: "simulation", from_asset, to_asset, amount_in: amount };
-        } else {
-          const swapResult = await sdk.ton.dex.swap({
-            fromAsset: from_asset,
-            toAsset: to_asset,
-            amount,
-            slippage,
-          });
-
-          const tradeId = sdk.db
-            .prepare(
-              `INSERT INTO trade_journal
-               (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
-               VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
-            )
-            .run(
-              Date.now(), from_asset, to_asset, amount,
-              swapResult?.expectedOutput ? parseFloat(swapResult.expectedOutput) : null,
-              resolvedEntryPriceUsd ?? null
-            )
-            .lastInsertRowid;
-
-          tradeResult = { trade_id: tradeId, mode: "real", from_asset, to_asset, amount_in: amount, dex: swapResult?.dex };
+        // Propagate a pre-chain validation failure (insufficient balance, wallet
+        // not initialized) verbatim, without registering any risk-management rule.
+        if (!swapResult.success) {
+          return swapResult;
         }
+
+        const tradeResult = {
+          trade_id: swapResult.data.trade_id,
+          mode,
+          from_asset,
+          to_asset,
+          amount_in: amount,
+          ...(mode === "real" ? { dex: swapResult.data.dex } : {}),
+        };
 
         // Register automatic risk management rules if requested
         const rules = [];

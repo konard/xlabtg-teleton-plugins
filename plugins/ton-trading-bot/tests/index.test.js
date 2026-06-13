@@ -729,6 +729,40 @@ describe("ton-trading-bot plugin", () => {
       assert.ok(result.error.includes("insufficient liquidity"));
     });
 
+    it("logs loudly and rethrows when a real swap succeeds on-chain but journaling fails (issue #182)", async () => {
+      // The swap has already moved real funds; if the trade_journal INSERT then
+      // throws, the position must not silently vanish. recordRealSwap must emit a
+      // CRITICAL, reconcile-manually log before propagating the failure so the
+      // operator knows funds moved without a recorded trade.
+      const errorLogs = [];
+      const sdk = makeSdk({
+        log: { info: () => {}, warn: () => {}, error: (m) => errorLogs.push(m), debug: () => {} },
+        db: {
+          exec: () => {},
+          prepare: (sql) => ({
+            get: () => null,
+            all: () => [],
+            run: () => {
+              if (sql.includes("INSERT INTO trade_journal")) {
+                throw new Error("disk I/O error");
+              }
+              return { lastInsertRowid: 1, changes: 1 };
+            },
+          }),
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_swap");
+      const result = await tool.execute(
+        { from_asset: "TON", to_asset: "EQCxE6test", amount: "2" },
+        makeContext()
+      );
+      assert.equal(result.success, false);
+      assert.ok(
+        errorLogs.some((m) => /CRITICAL/.test(m) && /reconcile/i.test(m)),
+        `Expected a loud CRITICAL reconcile log, got: ${JSON.stringify(errorLogs)}`
+      );
+    });
+
     it("is dm-only scope", () => {
       const sdk = makeSdk();
       const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_swap");
@@ -3146,6 +3180,63 @@ describe("ton-trading-bot plugin", () => {
       );
       assert.equal(result.success, false);
       assert.ok(result.error.includes("minimum") || result.error.includes("below"), `Unexpected error: ${result.error}`);
+    });
+
+    it("routes a real non-TON sell through the wallet check instead of bypassing it (issue #182)", async () => {
+      // A real sell of a non-TON jetton used to skip every risk check (the gate
+      // was `from_asset === "TON"` only) and fire sdk.ton.dex.swap directly. It
+      // must now flow through recordRealSwap, which refuses to swap when the
+      // wallet is not initialized — so no on-chain swap is attempted at all.
+      let swapCalls = 0;
+      const sdk = makeSdk({
+        ton: {
+          getAddress: () => null,
+          getBalance: async () => ({ balance: "100", balanceNano: "100000000000" }),
+          getPrice: async () => ({ usd: 3.5 }),
+          getJettonBalances: async () => [],
+          dex: {
+            quote: async () => ({ stonfi: { output: "10", price: "10" }, recommended: "stonfi" }),
+            swap: async () => { swapCalls++; return { expectedOutput: "10", dex: "stonfi" }; },
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_auto_execute");
+      const result = await tool.execute(
+        { from_asset: "EQJettonMasterAddress", to_asset: "TON", amount: 5, mode: "real" },
+        makeContext()
+      );
+      assert.equal(result.success, false);
+      assert.match(result.error, /wallet not initialized/i);
+      assert.equal(swapCalls, 0, "no on-chain swap may be attempted when the wallet is not initialized");
+    });
+
+    it("executes a real non-TON sell through recordRealSwap when the wallet is ready (issue #182)", async () => {
+      // The happy path for the same fix: with a wallet present, the real non-TON
+      // sell is recorded as a real trade via the shared helper (single swap call).
+      let swapCalls = 0;
+      const sdk = makeSdk({
+        dbRows: { lastInsertRowid: 77 },
+        ton: {
+          getAddress: () => "EQTestWalletAddress",
+          getBalance: async () => ({ balance: "100", balanceNano: "100000000000" }),
+          getPrice: async () => ({ usd: 3.5 }),
+          getJettonBalances: async () => [],
+          dex: {
+            quote: async () => ({ stonfi: { output: "12", price: "12" }, recommended: "stonfi" }),
+            swap: async (p) => { swapCalls++; return { expectedOutput: "12", minOutput: "11.4", dex: p.dex ?? "stonfi" }; },
+          },
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_auto_execute");
+      const result = await tool.execute(
+        { from_asset: "EQJettonMasterAddress", to_asset: "TON", amount: 5, mode: "real" },
+        makeContext()
+      );
+      assert.equal(result.success, true);
+      assert.equal(result.data.executed, true);
+      assert.equal(result.data.trade.trade_id, 77);
+      assert.equal(result.data.trade.mode, "real");
+      assert.equal(swapCalls, 1);
     });
   });
 
