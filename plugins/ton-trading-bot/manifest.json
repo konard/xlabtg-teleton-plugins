@@ -1,7 +1,7 @@
 {
   "id": "ton-trading-bot",
   "name": "TON Trading Bot",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, risk management, and automation.",
   "author": {
     "name": "xlabtg",
@@ -111,6 +111,10 @@
     {
       "name": "ton_trading_get_scheduled_trades",
       "description": "List pending scheduled trades and flag which ones are due for execution"
+    },
+    {
+      "name": "ton_trading_execute_scheduled_trade",
+      "description": "Execute a due scheduled trade and atomically mark it executed to prevent double-execution — DM only"
     },
     {
       "name": "ton_trading_reset_simulation_balance",

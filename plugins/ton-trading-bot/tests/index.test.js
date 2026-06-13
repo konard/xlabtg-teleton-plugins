@@ -106,27 +106,45 @@ function makeContext(overrides = {}) {
 function makeStatefulDb() {
   const trades = [];
   const simBalanceRows = [];
+  const scheduled = [];
   let tradeSeq = 0;
+  let schedSeq = 0;
 
   return {
     _trades: trades,
     _simBalanceRows: simBalanceRows,
+    _scheduled: scheduled,
     exec: () => {},
     prepare: (sql) => ({
       get: (...args) => {
         if (sql.includes("FROM sim_balance")) {
           return simBalanceRows.length ? simBalanceRows[simBalanceRows.length - 1] : null;
         }
+        if (sql.includes("FROM scheduled_trades") && sql.includes("WHERE id")) {
+          return scheduled.find((s) => s.id === args[0]) ?? null;
+        }
         if (sql.includes("FROM trade_journal") && sql.includes("WHERE id")) {
           return trades.find((t) => t.id === args[0]) ?? null;
         }
         return null;
       },
-      all: () => trades.slice(),
+      all: (...args) => {
+        if (sql.includes("FROM scheduled_trades")) {
+          let rows = scheduled.slice();
+          if (sql.includes("status = ?")) {
+            const status = args[0];
+            rows = rows.filter((s) => s.status === status);
+          }
+          rows.sort((a, b) => a.execute_at - b.execute_at);
+          const limit = args[args.length - 1];
+          return typeof limit === "number" ? rows.slice(0, limit) : rows;
+        }
+        return trades.slice();
+      },
       run: (...args) => {
         if (sql.includes("INSERT INTO sim_balance")) {
           simBalanceRows.push({ timestamp: args[0], balance: args[1] });
-          return { lastInsertRowid: simBalanceRows.length };
+          return { lastInsertRowid: simBalanceRows.length, changes: 1 };
         }
         if (sql.includes("INSERT INTO trade_journal")) {
           const real = sql.includes("'real'");
@@ -149,7 +167,7 @@ function makeStatefulDb() {
             note: real ? null : (args[6] ?? null),
           };
           trades.push(row);
-          return { lastInsertRowid: row.id };
+          return { lastInsertRowid: row.id, changes: 1 };
         }
         if (sql.includes("UPDATE trade_journal")) {
           // binds: amount_out, exit_price_usd, pnl, pnl_percent, note, id
@@ -163,9 +181,57 @@ function makeStatefulDb() {
             if (args[4] != null) row.note = args[4];
             row.status = "closed";
           }
-          return { lastInsertRowid: id };
+          return { lastInsertRowid: id, changes: row ? 1 : 0 };
         }
-        return { lastInsertRowid: 1 };
+        if (sql.includes("INSERT INTO scheduled_trades")) {
+          // binds: created_at, execute_at, mode, from, to, amount, note
+          const row = {
+            id: ++schedSeq,
+            created_at: args[0],
+            execute_at: args[1],
+            mode: args[2],
+            from_asset: args[3],
+            to_asset: args[4],
+            amount: args[5],
+            note: args[6] ?? null,
+            status: "pending",
+            trade_id: null,
+          };
+          scheduled.push(row);
+          return { lastInsertRowid: row.id, changes: 1 };
+        }
+        if (sql.includes("UPDATE scheduled_trades")) {
+          // trade_id linkage: SET trade_id = ? WHERE id = ?
+          if (sql.includes("SET trade_id = ?")) {
+            const [tradeId, id] = args;
+            const row = scheduled.find((s) => s.id === id);
+            if (row) {
+              row.trade_id = tradeId;
+              return { changes: 1 };
+            }
+            return { changes: 0 };
+          }
+          // status transitions (CAS claim / release / cancel) keyed by id —
+          // mirror SQLite's "changes" so compare-and-swap logic can be tested.
+          if (sql.includes("WHERE id = ?")) {
+            let target;
+            if (sql.includes("SET status = 'executed'")) target = "executed";
+            else if (sql.includes("SET status = 'pending'")) target = "pending";
+            else if (sql.includes("SET status = 'cancelled'")) target = "cancelled";
+            else if (sql.includes("SET status = ?")) target = args[0];
+            let guard = null;
+            if (sql.includes("AND status = 'pending'")) guard = "pending";
+            else if (sql.includes("AND status = 'executed'")) guard = "executed";
+            const id = args[args.length - 1];
+            const row = scheduled.find((s) => s.id === id);
+            if (!row) return { changes: 0 };
+            if (guard && row.status !== guard) return { changes: 0 };
+            row.status = target;
+            return { changes: 1 };
+          }
+          return { changes: 0 };
+        }
+        return { lastInsertRowid: 1, changes: 1 };
       },
     }),
   };
@@ -234,10 +300,10 @@ describe("ton-trading-bot plugin", () => {
       assert.ok(Array.isArray(toolList));
     });
 
-    it("exports exactly 41 tools", () => {
+    it("exports exactly 42 tools", () => {
       const sdk = makeSdk();
       const toolList = mod.tools(sdk);
-      assert.equal(toolList.length, 41);
+      assert.equal(toolList.length, 42);
     });
 
     it("exports position management tools documented in issue #144", () => {
@@ -2036,6 +2102,129 @@ describe("ton-trading-bot plugin", () => {
       assert.equal(result.data.due_now, 1);
       assert.ok(result.data.scheduled_trades[0].is_due === true);
       assert.ok(result.data.scheduled_trades[1].is_due === false);
+    });
+  });
+
+  // ── ton_trading_execute_scheduled_trade (issue #182: DCA stuck pending) ──────
+  describe("ton_trading_execute_scheduled_trade (issue #182)", () => {
+    function seedScheduled(db, overrides = {}) {
+      const row = {
+        id: 1,
+        created_at: 0,
+        execute_at: Date.now() - 1000, // due by default
+        mode: "simulation",
+        from_asset: "TON",
+        to_asset: "EQjetton",
+        amount: 5,
+        note: "[dca] order 1/3",
+        status: "pending",
+        trade_id: null,
+        ...overrides,
+      };
+      db._scheduled.push(row);
+      return row;
+    }
+
+    it("is DM-only and requires schedule_id", () => {
+      const sdk = makeSdk();
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+      assert.ok(tool, "tool should be registered");
+      assert.equal(tool.scope, "dm-only");
+      assert.ok(tool.parameters?.required?.includes("schedule_id"));
+    });
+
+    it("fills a due simulation order and marks it executed", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      seedScheduled(db);
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+
+      const result = await tool.execute({ schedule_id: 1, expected_amount_out: 10 }, makeContext());
+
+      assert.equal(result.success, true);
+      assert.equal(result.data.status, "executed");
+      assert.equal(typeof result.data.trade_id, "number");
+      // The scheduled row is advanced and linked to the journal trade it created.
+      assert.equal(db._scheduled[0].status, "executed");
+      assert.equal(db._scheduled[0].trade_id, result.data.trade_id);
+      // A real journal entry was opened with a unit-safe entry price (TON = $3.5).
+      assert.equal(db._trades.length, 1);
+      assert.equal(db._trades[0].mode, "simulation");
+      assert.equal(db._trades[0].status, "open");
+      assert.equal(db._trades[0].entry_price_usd, 3.5);
+    });
+
+    it("never executes the same order twice (no double-spend)", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      seedScheduled(db);
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+
+      const first = await tool.execute({ schedule_id: 1, expected_amount_out: 10 }, makeContext());
+      assert.equal(first.success, true);
+      assert.equal(db._trades.length, 1);
+
+      // A second poll on the same id must be a no-op — this is the core #182 fix.
+      const second = await tool.execute({ schedule_id: 1, expected_amount_out: 10 }, makeContext());
+      assert.equal(second.success, false);
+      assert.ok(/already executed/i.test(second.error));
+      assert.equal(db._trades.length, 1, "no second swap should be recorded");
+    });
+
+    it("refuses an order that is not due yet unless forced", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      seedScheduled(db, { execute_at: Date.now() + 3_600_000 }); // 1h in the future
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+
+      const tooEarly = await tool.execute({ schedule_id: 1, expected_amount_out: 10 }, makeContext());
+      assert.equal(tooEarly.success, false);
+      assert.ok(/not due/i.test(tooEarly.error));
+      assert.equal(db._scheduled[0].status, "pending");
+      assert.equal(db._trades.length, 0);
+
+      const forced = await tool.execute({ schedule_id: 1, expected_amount_out: 10, force: true }, makeContext());
+      assert.equal(forced.success, true);
+      assert.equal(db._scheduled[0].status, "executed");
+    });
+
+    it("requires expected_amount_out for simulation orders without claiming the order", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      seedScheduled(db);
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+
+      const result = await tool.execute({ schedule_id: 1 }, makeContext());
+      assert.equal(result.success, false);
+      assert.ok(/expected_amount_out/.test(result.error));
+      assert.equal(db._scheduled[0].status, "pending");
+    });
+
+    it("parks a failed real order as 'failed' so it is not silently retried", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      // Real swap throws after the claim — on-chain state is unknown, so the
+      // order must NOT be reset to pending (that could double-spend).
+      sdk.ton.dex.swap = async () => {
+        throw new Error("DEX timeout");
+      };
+      seedScheduled(db, { mode: "real" });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+
+      const result = await tool.execute({ schedule_id: 1 }, makeContext());
+      assert.equal(result.success, false);
+      assert.ok(/DEX timeout/.test(result.error));
+      assert.equal(db._scheduled[0].status, "failed");
+      assert.equal(db._trades.length, 0);
+    });
+
+    it("returns a clear error for a missing schedule id", async () => {
+      const db = makeStatefulDb();
+      const sdk = makeStatefulSdk({ db });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_execute_scheduled_trade");
+      const result = await tool.execute({ schedule_id: 999, expected_amount_out: 10 }, makeContext());
+      assert.equal(result.success, false);
+      assert.ok(/not found/.test(result.error));
     });
   });
 

@@ -37,6 +37,7 @@
  * Automation tools (P2):
  *   - ton_trading_schedule_trade              — store a pending trade for future execution
  *   - ton_trading_get_scheduled_trades        — list pending scheduled trades
+ *   - ton_trading_execute_scheduled_trade     — execute a due order and mark it executed atomically
  *
  * Simulation management tools:
  *   - ton_trading_reset_simulation_balance    — reset virtual balance to starting amount
@@ -78,7 +79,7 @@
 
 export const manifest = {
   name: "ton-trading-bot",
-  version: "2.2.0",
+  version: "2.3.0",
   sdkVersion: ">=1.0.0",
   description: "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, and risk management.",
   defaultConfig: {
@@ -143,7 +144,7 @@ export function migrate(db) {
       to_asset TEXT NOT NULL,
       amount REAL NOT NULL,
       note TEXT,
-      status TEXT NOT NULL DEFAULT 'pending'  -- 'pending' | 'executed' | 'cancelled'
+      status TEXT NOT NULL DEFAULT 'pending'  -- 'pending' | 'executed' | 'cancelled' | 'failed'
     );
   `);
 
@@ -155,6 +156,9 @@ export function migrate(db) {
     "ALTER TABLE stop_loss_rules ADD COLUMN trailing_stop INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE stop_loss_rules ADD COLUMN trailing_stop_percent REAL",
     "ALTER TABLE stop_loss_rules ADD COLUMN peak_price REAL",
+    // Links an executed scheduled trade to the trade_journal row it produced, so
+    // a DCA/grid order can never be silently re-executed (issue #182).
+    "ALTER TABLE scheduled_trades ADD COLUMN trade_id INTEGER",
   ];
   for (const sql of alterColumns) {
     try {
@@ -390,6 +394,145 @@ function closeTradeJournalEntry(sdk, entry, amountOut, exitPriceUsd, note) {
       profit_or_loss: pnl >= 0 ? "profit" : "loss",
       mode: entry.mode,
       status: "closed",
+    },
+  };
+}
+
+// Core paper-trade swap: validate the virtual balance, deduct it (if selling
+// TON) and record an open 'simulation' trade with a unit-safe entry price.
+// Shared by ton_trading_simulate_trade and ton_trading_execute_scheduled_trade
+// so scheduled DCA orders record P&L exactly like a manual simulation.
+async function recordSimulatedSwap(sdk, { from_asset, to_asset, amount_in, expected_amount_out, note, entry_price_usd }) {
+  const simBalance = getSimBalance(sdk);
+  const minBalance = sdk.pluginConfig.minBalanceTON ?? 1;
+
+  if (from_asset === "TON" && simBalance < amount_in) {
+    return {
+      success: false,
+      error: `Insufficient simulation balance: ${simBalance} TON (need ${amount_in} TON)`,
+    };
+  }
+
+  if (from_asset === "TON" && simBalance - amount_in < minBalance) {
+    return {
+      success: false,
+      error: `Trade would bring simulation balance below minimum (${minBalance} TON)`,
+    };
+  }
+
+  // Update virtual balance: if selling TON, deduct it
+  if (from_asset === "TON") {
+    setSimBalance(sdk, simBalance - amount_in);
+  }
+
+  // Record the from_asset USD price at entry so closing P&L is unit-safe
+  // even when the agent omits entry_price_usd (root cause of issue #182).
+  const resolvedEntryPrice =
+    toFiniteNumber(entry_price_usd) ?? (await inferAssetPriceUsd(sdk, from_asset));
+
+  const tradeId = sdk.db
+    .prepare(
+      `INSERT INTO trade_journal
+       (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status, note)
+       VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, ?, 'open', ?)`
+    )
+    .run(Date.now(), from_asset, to_asset, amount_in, expected_amount_out, resolvedEntryPrice ?? null, note ?? null)
+    .lastInsertRowid;
+
+  sdk.log.info(
+    `Simulated trade #${tradeId}: ${amount_in} ${from_asset} → ${expected_amount_out} ${to_asset}`
+  );
+
+  return {
+    success: true,
+    data: {
+      trade_id: tradeId,
+      mode: "simulation",
+      from_asset,
+      to_asset,
+      amount_in,
+      expected_amount_out,
+      entry_price_usd: resolvedEntryPrice ?? null,
+      new_simulation_balance: from_asset === "TON" ? simBalance - amount_in : simBalance,
+      status: "open",
+    },
+  };
+}
+
+// Core real DEX swap: spend real funds on-chain and record an open 'real' trade
+// with a unit-safe entry price. Shared by ton_trading_execute_swap and
+// ton_trading_execute_scheduled_trade. Returns { success:false } only for
+// pre-chain validation (no funds moved); a failure during/after the on-chain
+// swap is signalled by throwing so callers can avoid an unsafe auto-retry.
+// `context` is optional — when it carries a chatId a Telegram confirmation is sent.
+async function recordRealSwap(sdk, { from_asset, to_asset, amount, slippage, dex, entry_price_usd }, context) {
+  const walletAddress = sdk.ton.getAddress();
+  if (!walletAddress) {
+    return { success: false, error: "Wallet not initialized" };
+  }
+
+  const result = await sdk.ton.dex.swap({
+    fromAsset: from_asset,
+    toAsset: to_asset,
+    amount: parseFloat(amount),
+    slippage,
+    ...(dex ? { dex } : {}),
+  });
+
+  // Record the from_asset USD price at entry so closing P&L is unit-safe
+  // even when the agent omits entry_price_usd (issue #182).
+  const resolvedEntryPrice =
+    toFiniteNumber(entry_price_usd) ?? (await inferAssetPriceUsd(sdk, from_asset));
+
+  const tradeId = sdk.db
+    .prepare(
+      `INSERT INTO trade_journal
+       (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
+       VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
+    )
+    .run(
+      Date.now(),
+      from_asset,
+      to_asset,
+      parseFloat(amount),
+      result?.expectedOutput ? parseFloat(result.expectedOutput) : null,
+      resolvedEntryPrice ?? null
+    )
+    .lastInsertRowid;
+
+  sdk.log.info(
+    `Swap executed #${tradeId}: ${amount} ${from_asset} → ${to_asset} via ${result?.dex ?? dex ?? "best"}`
+  );
+
+  if (context?.chatId != null) {
+    try {
+      await sdk.telegram.sendMessage(
+        context.chatId,
+        `Swap submitted: ${amount} ${from_asset} → ${to_asset}\nExpected output: ${result?.expectedOutput ?? "unknown"}\nTrade ID: ${tradeId}\nAllow ~30 seconds for on-chain confirmation.`
+      );
+    } catch (msgErr) {
+      if (msgErr.name === "PluginSDKError") {
+        sdk.log.warn(`Could not send confirmation message: ${msgErr.code}: ${msgErr.message}`);
+      } else {
+        sdk.log.warn(`Could not send confirmation message: ${msgErr.message}`);
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: {
+      trade_id: tradeId,
+      from_asset,
+      to_asset,
+      amount_in: amount,
+      entry_price_usd: resolvedEntryPrice ?? null,
+      expected_output: result?.expectedOutput ?? null,
+      min_output: result?.minOutput ?? null,
+      slippage,
+      dex: result?.dex ?? dex ?? "auto",
+      status: "open",
+      note: "Allow ~30 seconds for on-chain confirmation",
     },
   };
 }
@@ -753,60 +896,14 @@ export const tools = (sdk) => [
     execute: async (params, _context) => {
       const { from_asset, to_asset, amount_in, expected_amount_out, note, entry_price_usd } = params;
       try {
-        const simBalance = getSimBalance(sdk);
-        const minBalance = sdk.pluginConfig.minBalanceTON ?? 1;
-
-        if (from_asset === "TON" && simBalance < amount_in) {
-          return {
-            success: false,
-            error: `Insufficient simulation balance: ${simBalance} TON (need ${amount_in} TON)`,
-          };
-        }
-
-        if (from_asset === "TON" && simBalance - amount_in < minBalance) {
-          return {
-            success: false,
-            error: `Trade would bring simulation balance below minimum (${minBalance} TON)`,
-          };
-        }
-
-        // Update virtual balance: if selling TON, deduct it
-        if (from_asset === "TON") {
-          setSimBalance(sdk, simBalance - amount_in);
-        }
-
-        // Record the from_asset USD price at entry so closing P&L is unit-safe
-        // even when the agent omits entry_price_usd (root cause of issue #182).
-        const resolvedEntryPrice =
-          toFiniteNumber(entry_price_usd) ?? (await inferAssetPriceUsd(sdk, from_asset));
-
-        const tradeId = sdk.db
-          .prepare(
-            `INSERT INTO trade_journal
-             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status, note)
-             VALUES (?, 'simulation', 'buy', ?, ?, ?, ?, ?, 'open', ?)`
-          )
-          .run(Date.now(), from_asset, to_asset, amount_in, expected_amount_out, resolvedEntryPrice ?? null, note ?? null)
-          .lastInsertRowid;
-
-        sdk.log.info(
-          `Simulated trade #${tradeId}: ${amount_in} ${from_asset} → ${expected_amount_out} ${to_asset}`
-        );
-
-        return {
-          success: true,
-          data: {
-            trade_id: tradeId,
-            mode: "simulation",
-            from_asset,
-            to_asset,
-            amount_in,
-            expected_amount_out,
-            entry_price_usd: resolvedEntryPrice ?? null,
-            new_simulation_balance: from_asset === "TON" ? simBalance - amount_in : simBalance,
-            status: "open",
-          },
-        };
+        return await recordSimulatedSwap(sdk, {
+          from_asset,
+          to_asset,
+          amount_in,
+          expected_amount_out,
+          note,
+          entry_price_usd,
+        });
       } catch (err) {
         sdk.log.error(`ton_trading_simulate_trade failed: ${err.message}`);
         return { success: false, error: String(err.message).slice(0, 500) };
@@ -865,73 +962,11 @@ export const tools = (sdk) => [
       } = params;
 
       try {
-        const walletAddress = sdk.ton.getAddress();
-        if (!walletAddress) {
-          return { success: false, error: "Wallet not initialized" };
-        }
-
-        const result = await sdk.ton.dex.swap({
-          fromAsset: from_asset,
-          toAsset: to_asset,
-          amount: parseFloat(amount),
-          slippage,
-          ...(dex ? { dex } : {}),
-        });
-
-        // Record the from_asset USD price at entry so closing P&L is unit-safe
-        // even when the agent omits entry_price_usd (issue #182).
-        const resolvedEntryPrice =
-          toFiniteNumber(entry_price_usd) ?? (await inferAssetPriceUsd(sdk, from_asset));
-
-        const tradeId = sdk.db
-          .prepare(
-            `INSERT INTO trade_journal
-             (timestamp, mode, action, from_asset, to_asset, amount_in, amount_out, entry_price_usd, status)
-             VALUES (?, 'real', 'buy', ?, ?, ?, ?, ?, 'open')`
-          )
-          .run(
-            Date.now(),
-            from_asset,
-            to_asset,
-            parseFloat(amount),
-            result?.expectedOutput ? parseFloat(result.expectedOutput) : null,
-            resolvedEntryPrice ?? null
-          )
-          .lastInsertRowid;
-
-        sdk.log.info(
-          `Swap executed #${tradeId}: ${amount} ${from_asset} → ${to_asset} via ${result?.dex ?? dex ?? "best"}`
+        return await recordRealSwap(
+          sdk,
+          { from_asset, to_asset, amount, slippage, dex, entry_price_usd },
+          context
         );
-
-        try {
-          await sdk.telegram.sendMessage(
-            context.chatId,
-            `Swap submitted: ${amount} ${from_asset} → ${to_asset}\nExpected output: ${result?.expectedOutput ?? "unknown"}\nTrade ID: ${tradeId}\nAllow ~30 seconds for on-chain confirmation.`
-          );
-        } catch (msgErr) {
-          if (msgErr.name === "PluginSDKError") {
-            sdk.log.warn(`Could not send confirmation message: ${msgErr.code}: ${msgErr.message}`);
-          } else {
-            sdk.log.warn(`Could not send confirmation message: ${msgErr.message}`);
-          }
-        }
-
-        return {
-          success: true,
-          data: {
-            trade_id: tradeId,
-            from_asset,
-            to_asset,
-            amount_in: amount,
-            entry_price_usd: resolvedEntryPrice ?? null,
-            expected_output: result?.expectedOutput ?? null,
-            min_output: result?.minOutput ?? null,
-            slippage,
-            dex: result?.dex ?? dex ?? "auto",
-            status: "open",
-            note: "Allow ~30 seconds for on-chain confirmation",
-          },
-        };
       } catch (err) {
         sdk.log.error(`ton_trading_execute_swap failed: ${err.message}`);
         if (err.name === "PluginSDKError") {
@@ -2600,7 +2635,7 @@ export const tools = (sdk) => [
   {
     name: "ton_trading_schedule_trade",
     description:
-      "Store a pending trade to be executed at a future time. The LLM should check scheduled trades on each run and execute any that are due. Returns the scheduled trade ID.",
+      "Store a pending trade to be executed at a future time. On each run, list due orders with ton_trading_get_scheduled_trades and fill each one with ton_trading_execute_scheduled_trade (which swaps and marks it executed atomically). Returns the scheduled trade ID.",
     category: "action",
     parameters: {
       type: "object",
@@ -2677,15 +2712,15 @@ export const tools = (sdk) => [
   {
     name: "ton_trading_get_scheduled_trades",
     description:
-      "List pending scheduled trades. Returns all pending trades, highlighting those that are due now (execute_at <= current time). The LLM should execute due trades using ton_trading_execute_swap or ton_trading_simulate_trade.",
+      "List scheduled trades and flag which ones are due (execute_at <= now). Execute each due order with ton_trading_execute_scheduled_trade — it performs the swap AND advances the order's status atomically, so an order is never executed twice. Do NOT call ton_trading_execute_swap/ton_trading_simulate_trade directly for scheduled orders: that would leave them stuck 'pending' and risk re-execution.",
     category: "data-bearing",
     parameters: {
       type: "object",
       properties: {
         status: {
           type: "string",
-          description: 'Filter by status: "pending", "executed", "cancelled", or "all" (default "pending")',
-          enum: ["pending", "executed", "cancelled", "all"],
+          description: 'Filter by status: "pending", "executed", "cancelled", "failed", or "all" (default "pending")',
+          enum: ["pending", "executed", "cancelled", "failed", "all"],
         },
         limit: {
           type: "integer",
@@ -2722,12 +2757,180 @@ export const tools = (sdk) => [
             scheduled_trades: annotated,
             due_now: dueTrades.length,
             note: dueTrades.length > 0
-              ? `${dueTrades.length} trade(s) are due — execute them using ton_trading_execute_swap or ton_trading_simulate_trade`
+              ? `${dueTrades.length} trade(s) are due — execute each with ton_trading_execute_scheduled_trade (pass its schedule id) so the order is filled and marked executed atomically`
               : null,
           },
         };
       } catch (err) {
         sdk.log.error(`ton_trading_get_scheduled_trades failed: ${err.message}`);
+        return { success: false, error: String(err.message).slice(0, 500) };
+      }
+    },
+  },
+
+  // ── Tool 23b: ton_trading_execute_scheduled_trade ──────────────────────────
+  {
+    name: "ton_trading_execute_scheduled_trade",
+    description:
+      "Execute a single due scheduled trade by its id and atomically mark it 'executed'. This is the correct way to fill DCA/grid orders from ton_trading_get_scheduled_trades: it claims the order with a compare-and-swap before swapping, so a due order can never be executed twice (the root cause of orders stuck 'pending' and double-spent in issue #182). Only available in direct messages because it can spend real funds.",
+    category: "action",
+    scope: "dm-only",
+    parameters: {
+      type: "object",
+      properties: {
+        schedule_id: {
+          type: "integer",
+          description: "Id of the pending scheduled trade to execute (from ton_trading_get_scheduled_trades)",
+        },
+        expected_amount_out: {
+          type: "number",
+          description: "Expected output amount from a fresh quote (ton_trading_get_market_data). Required for simulation orders; ignored for real orders where the DEX computes the output.",
+        },
+        entry_price_usd: {
+          type: "number",
+          description: "USD price of the from_asset at execution. Recorded for unit-safe P&L; auto-inferred for TON and stablecoins when omitted.",
+        },
+        slippage: {
+          type: "number",
+          description: "Slippage tolerance for real orders (e.g. 0.05 for 5%). Defaults to plugin config.",
+          minimum: 0.001,
+          maximum: 0.5,
+        },
+        dex: {
+          type: "string",
+          description: 'Preferred DEX for real orders: "stonfi", "dedust", or omit for best quote',
+          enum: ["stonfi", "dedust"],
+        },
+        force: {
+          type: "boolean",
+          description: "Execute even if the order is not due yet (execute_at is in the future). Default false.",
+        },
+      },
+      required: ["schedule_id"],
+    },
+    execute: async (params, context) => {
+      const { schedule_id, expected_amount_out, entry_price_usd, slippage, dex, force = false } = params;
+      try {
+        if (schedule_id == null) {
+          return { success: false, error: "schedule_id is required" };
+        }
+
+        const row = sdk.db.prepare("SELECT * FROM scheduled_trades WHERE id = ?").get(schedule_id);
+        if (!row) {
+          return { success: false, error: `Scheduled trade ${schedule_id} not found` };
+        }
+        if (row.status !== "pending") {
+          // Idempotent guard: an already-executed/cancelled/failed order must not
+          // run again. This is what stops the double-execution reported in #182.
+          return {
+            success: false,
+            error: `Scheduled trade ${schedule_id} is already ${row.status} — nothing to execute`,
+            data: { schedule_id, status: row.status },
+          };
+        }
+
+        const now = Date.now();
+        if (!force && row.execute_at > now) {
+          return {
+            success: false,
+            error: `Scheduled trade ${schedule_id} is not due yet (due in ${row.execute_at - now} ms). Pass force:true to execute it early.`,
+            data: { schedule_id, due_in_ms: row.execute_at - now },
+          };
+        }
+
+        if (row.mode !== "real" && toFiniteNumber(expected_amount_out) == null) {
+          return {
+            success: false,
+            error: "expected_amount_out is required to execute a simulation order — fetch a fresh quote with ton_trading_get_market_data first",
+          };
+        }
+
+        // Atomic claim: flip pending → executed only if it is still pending. If a
+        // concurrent poll already claimed it, changes === 0 and we bail out, so
+        // the swap below runs at most once per order.
+        const claim = sdk.db
+          .prepare("UPDATE scheduled_trades SET status = 'executed' WHERE id = ? AND status = 'pending'")
+          .run(schedule_id);
+        if (claim.changes !== 1) {
+          return {
+            success: false,
+            error: `Scheduled trade ${schedule_id} was already claimed by another run`,
+          };
+        }
+
+        let swapResult;
+        try {
+          if (row.mode === "real") {
+            swapResult = await recordRealSwap(
+              sdk,
+              {
+                from_asset: row.from_asset,
+                to_asset: row.to_asset,
+                amount: String(row.amount),
+                slippage: toFiniteNumber(slippage) ?? sdk.pluginConfig.defaultSlippage ?? 0.05,
+                dex,
+                entry_price_usd,
+              },
+              context
+            );
+          } else {
+            swapResult = await recordSimulatedSwap(sdk, {
+              from_asset: row.from_asset,
+              to_asset: row.to_asset,
+              amount_in: row.amount,
+              expected_amount_out,
+              note: row.note,
+              entry_price_usd,
+            });
+          }
+        } catch (swapErr) {
+          // The swap threw. For real orders the on-chain state is unknown, so we
+          // park the order in a terminal 'failed' state rather than 'pending' —
+          // re-running could double-spend. Simulation is safe to retry, so we
+          // release it back to 'pending'.
+          const releaseStatus = row.mode === "real" ? "failed" : "pending";
+          sdk.db
+            .prepare("UPDATE scheduled_trades SET status = ? WHERE id = ? AND status = 'executed'")
+            .run(releaseStatus, schedule_id);
+          throw swapErr;
+        }
+
+        if (!swapResult || swapResult.success !== true) {
+          // Pre-chain validation rejected the swap (no funds moved) — release the
+          // claim so the order can be retried once the condition is resolved.
+          sdk.db
+            .prepare("UPDATE scheduled_trades SET status = 'pending' WHERE id = ? AND status = 'executed'")
+            .run(schedule_id);
+          return swapResult ?? { success: false, error: "Swap returned no result" };
+        }
+
+        // Success — link the journal trade to the schedule row for auditing.
+        const tradeId = swapResult.data?.trade_id ?? null;
+        if (tradeId != null) {
+          try {
+            sdk.db.prepare("UPDATE scheduled_trades SET trade_id = ? WHERE id = ?").run(tradeId, schedule_id);
+          } catch {
+            // Legacy DB without the trade_id column — linkage is best-effort.
+          }
+        }
+
+        sdk.log.info(`Executed scheduled trade #${schedule_id} → journal trade #${tradeId ?? "?"}`);
+
+        return {
+          success: true,
+          data: {
+            schedule_id,
+            status: "executed",
+            mode: row.mode,
+            trade_id: tradeId,
+            trade: swapResult.data,
+          },
+        };
+      } catch (err) {
+        sdk.log.error(`ton_trading_execute_scheduled_trade failed: ${err.message}`);
+        if (err.name === "PluginSDKError") {
+          return { success: false, error: `${err.code}: ${String(err.message).slice(0, 500)}` };
+        }
         return { success: false, error: String(err.message).slice(0, 500) };
       }
     },
@@ -3613,7 +3816,7 @@ export const tools = (sdk) => [
   {
     name: "ton_trading_create_schedule",
     description:
-      "Create a recurring trading schedule for strategies like dollar-cost averaging (DCA) or grid trading. Stores multiple pending trades at calculated intervals. Use ton_trading_get_scheduled_trades to check and execute due trades.",
+      "Create a recurring trading schedule for strategies like dollar-cost averaging (DCA) or grid trading. Stores multiple pending trades at calculated intervals. List due orders with ton_trading_get_scheduled_trades and fill each with ton_trading_execute_scheduled_trade, which swaps and marks the order executed atomically (no double-execution).",
     category: "action",
     parameters: {
       type: "object",
@@ -3702,7 +3905,7 @@ export const tools = (sdk) => [
             num_orders_created: scheduledIds.length,
             total_amount: parseFloat((amount_per_trade * num_orders).toFixed(4)),
             schedule: scheduledIds,
-            note: `${num_orders} orders scheduled. Check and execute due ones with ton_trading_get_scheduled_trades.`,
+            note: `${num_orders} orders scheduled. List due ones with ton_trading_get_scheduled_trades, then fill each with ton_trading_execute_scheduled_trade.`,
           },
         };
       } catch (err) {
