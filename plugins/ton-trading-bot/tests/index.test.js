@@ -1009,6 +1009,116 @@ describe("ton-trading-bot plugin", () => {
     });
   });
 
+  // ── Statistical consistency (issue #182) ──────────────────────────────────
+  describe("statistical consistency (issue #182)", () => {
+    it("get_portfolio_summary: win + loss + breakeven + unscored === total_closed_trades", async () => {
+      // The bug report saw total_closed_trades=177 while win+loss=172 — the 5
+      // missing rows were breakeven / unscored (null-pnl) trades hidden from the
+      // books. Every closed trade must now be accounted for in exactly one bucket.
+      const closedTrades = [
+        { pnl: 5, pnl_percent: 3, mode: "simulation" },
+        { pnl: 8, pnl_percent: 4, mode: "simulation" },
+        { pnl: -4, pnl_percent: -2, mode: "simulation" },
+        { pnl: -1, pnl_percent: -1, mode: "simulation" },
+        { pnl: 0, pnl_percent: 0, mode: "simulation" }, // breakeven
+        { pnl: null, pnl_percent: null, mode: "simulation" }, // unscored
+        { pnl: undefined, pnl_percent: undefined, mode: "simulation" }, // unscored
+      ];
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: (sql) => ({
+            get: () => ({ balance: 1000 }),
+            all: () => (sql.includes("status = 'closed'") ? closedTrades : []),
+            run: () => ({ lastInsertRowid: 1, changes: 0 }),
+          }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_portfolio_summary");
+      const result = await tool.execute({ mode: "simulation" }, makeContext());
+      assert.equal(result.success, true);
+      const d = result.data;
+      assert.equal(d.total_closed_trades, 7);
+      assert.equal(d.win_count, 2);
+      assert.equal(d.loss_count, 2);
+      assert.equal(d.breakeven_count, 1);
+      assert.equal(d.unscored_count, 2);
+      assert.equal(
+        d.win_count + d.loss_count + d.breakeven_count + d.unscored_count,
+        d.total_closed_trades,
+        "the books must reconcile exactly"
+      );
+      // Win rate is over decisive trades only: 2 / (2 + 2) = 0.5.
+      assert.equal(d.win_rate, 0.5);
+      // Realized P&L sums only finite pnl: 5 + 8 - 4 - 1 = 8 (null/undefined excluded).
+      assert.equal(d.realized_pnl_usd, 8);
+    });
+
+    it("calculate_risk_metrics: unscored trades (null pnl_percent) do not dilute the win rate", async () => {
+      // "65 losses but avg loss $0" stemmed from null P&L coerced to 0 and counted
+      // in the denominator. Unscored rows must be excluded from the observations.
+      const trades = [
+        { pnl_percent: 10 },
+        { pnl_percent: -5 },
+        { pnl_percent: null }, // unscored — must be ignored
+        { pnl_percent: undefined }, // unscored — must be ignored
+      ];
+      const sdk = makeSdk({
+        db: {
+          exec: () => {},
+          prepare: () => ({ get: () => null, all: () => trades, run: () => ({ lastInsertRowid: 1 }) }),
+        },
+      });
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_calculate_risk_metrics");
+      const result = await tool.execute({ mode: "all" }, {});
+      assert.equal(result.success, true);
+      assert.equal(result.data.trades_analysed, 4);
+      assert.equal(result.data.scored_trades, 2);
+      assert.equal(result.data.win_count, 1);
+      assert.equal(result.data.loss_count, 1);
+      // Win rate must be 1 / 2 = 0.5, NOT 1 / 4 = 0.25 (diluted by unscored rows).
+      assert.equal(result.data.win_rate, 0.5);
+    });
+
+    it("get_performance_dashboard: breakeven and unscored trades reconcile; avg loss is never falsely $0", async () => {
+      const closedTrades = [
+        { id: 1, pnl: 10, pnl_percent: 5, timestamp: Date.now() - 1000 },
+        { id: 2, pnl: -3, pnl_percent: -2, timestamp: Date.now() - 2000 },
+        { id: 3, pnl: 0, pnl_percent: 0, timestamp: Date.now() - 3000 }, // breakeven
+        { id: 4, pnl: null, pnl_percent: null, timestamp: Date.now() - 4000 }, // unscored
+      ];
+      const sdk = {
+        ...makeSdk(),
+        db: {
+          exec: () => {},
+          prepare: (sql) => ({
+            get: () => ({ count: 0 }),
+            all: () => (sql.includes("status = 'closed'") ? closedTrades : []),
+            run: () => ({ lastInsertRowid: 1, changes: 0 }),
+          }),
+        },
+      };
+      const tool = mod.tools(sdk).find((t) => t.name === "ton_trading_get_performance_dashboard");
+      const result = await tool.execute({ mode: "all", days: 30 }, makeContext());
+      assert.equal(result.success, true);
+      const d = result.data;
+      assert.equal(d.total_trades, 4);
+      assert.equal(d.win_count, 1);
+      assert.equal(d.loss_count, 1);
+      assert.equal(d.breakeven_count, 1);
+      assert.equal(d.unscored_count, 1);
+      assert.equal(
+        d.win_count + d.loss_count + d.breakeven_count + d.unscored_count,
+        d.total_trades,
+        "the books must reconcile exactly"
+      );
+      // avg loss comes from real losses only — never a misleading $0.
+      assert.equal(d.avg_loss_usd, -3);
+      assert.equal(d.win_rate, 0.5); // 1 / (1 + 1)
+    });
+  });
+
   // ── Position management tools (issue #144) ────────────────────────────────
   describe("position management tools", () => {
     it("lists open positions filtered by mode", async () => {

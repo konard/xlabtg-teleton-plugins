@@ -185,6 +185,58 @@ function toFiniteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+// Classify closed trades by realized P&L so every statistics tool reconciles:
+//   total = win + loss + breakeven + unscored
+// A trade is "unscored" when its pnl is null or non-finite (P&L was never
+// recorded). Counting those silently as zero used to break the books — e.g.
+// total_closed_trades=177 while win+loss=172, or "65 losses" with avg loss $0
+// because unscored rows diluted the averages (issue #182). Averages here are
+// taken only over decisive trades so they never drift toward zero.
+function summarizeClosedPnl(trades) {
+  const rows = Array.isArray(trades) ? trades : [];
+  let win = 0;
+  let loss = 0;
+  let breakeven = 0;
+  let unscored = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  let realizedPnl = 0;
+  for (const trade of rows) {
+    const pnl = toFiniteNumber(trade?.pnl);
+    if (pnl == null) {
+      unscored += 1;
+      continue;
+    }
+    realizedPnl += pnl;
+    if (pnl > 0) {
+      win += 1;
+      grossProfit += pnl;
+    } else if (pnl < 0) {
+      loss += 1;
+      grossLoss += pnl;
+    } else {
+      breakeven += 1;
+    }
+  }
+  const decisive = win + loss;
+  return {
+    total: rows.length,
+    win,
+    loss,
+    breakeven,
+    unscored,
+    scored: win + loss + breakeven,
+    realizedPnl,
+    grossProfit,
+    grossLoss,
+    avgWin: win > 0 ? grossProfit / win : 0,
+    avgLoss: loss > 0 ? grossLoss / loss : 0,
+    // Win rate over decisive trades only (wins + losses); null when none are
+    // decisive, so a book of pure breakeven/unscored trades is not "0% win".
+    winRate: decisive > 0 ? win / decisive : null,
+  };
+}
+
 function getDexOutput(result, preferredDex) {
   if (!result || typeof result !== "object") return null;
 
@@ -2165,7 +2217,26 @@ export const tools = (sdk) => [
           };
         }
 
-        const returns = trades.map((t) => (t.pnl_percent ?? 0) / 100);
+        // Only trades with a finite recorded P&L are real observations. Unscored
+        // rows (null pnl_percent) must not be coerced to 0 — that diluted the win
+        // rate and dragged drawdown/VaR toward zero (issue #182).
+        const returns = trades
+          .map((t) => toFiniteNumber(t.pnl_percent))
+          .filter((p) => p != null)
+          .map((p) => p / 100);
+
+        if (returns.length === 0) {
+          return {
+            success: true,
+            data: {
+              mode,
+              lookback_days,
+              note: "No closed trades with a recorded P&L in this period",
+              trades_analysed: trades.length,
+              scored_trades: 0,
+            },
+          };
+        }
 
         const sorted = [...returns].sort((a, b) => a - b);
         const varIndex = Math.floor((1 - confidence_level) * sorted.length);
@@ -2193,9 +2264,13 @@ export const tools = (sdk) => [
 
         const wins = returns.filter((r) => r > 0).length;
         const losses = returns.filter((r) => r < 0).length;
+        const breakeven = returns.filter((r) => r === 0).length;
+        const decisive = wins + losses;
         const avgWin = wins > 0 ? returns.filter((r) => r > 0).reduce((s, r) => s + r, 0) / wins : 0;
         const avgLoss = losses > 0 ? Math.abs(returns.filter((r) => r < 0).reduce((s, r) => s + r, 0) / losses) : 0;
         const profitFactor = avgLoss > 0 ? parseFloat((avgWin / avgLoss).toFixed(4)) : null;
+        // Win rate over decisive trades only (wins + losses); null when none.
+        const winRate = decisive > 0 ? wins / decisive : null;
 
         return {
           success: true,
@@ -2203,7 +2278,11 @@ export const tools = (sdk) => [
             mode,
             lookback_days,
             trades_analysed: trades.length,
-            win_rate: parseFloat((wins / trades.length).toFixed(4)),
+            scored_trades: returns.length,
+            win_count: wins,
+            loss_count: losses,
+            breakeven_count: breakeven,
+            win_rate: winRate != null ? parseFloat(winRate.toFixed(4)) : null,
             avg_win_percent: parseFloat((avgWin * 100).toFixed(2)),
             avg_loss_percent: parseFloat((avgLoss * 100).toFixed(2)),
             profit_factor: profitFactor,
@@ -3103,10 +3182,8 @@ export const tools = (sdk) => [
         const totalOpenPositions = openTrades.length;
         const totalExposureTon = openTrades.reduce((sum, t) => sum + (t.from_asset === "TON" ? (t.amount_in ?? 0) : 0), 0);
 
-        const realizedPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
-        const winCount = closedTrades.filter((t) => (t.pnl ?? 0) > 0).length;
-        const lossCount = closedTrades.filter((t) => (t.pnl ?? 0) < 0).length;
-        const winRate = closedTrades.length > 0 ? winCount / closedTrades.length : null;
+        const stats = summarizeClosedPnl(closedTrades);
+        const realizedPnl = stats.realizedPnl;
 
         const simBalance = getSimBalance(sdk);
         const realBalance = await sdk.ton.getBalance().catch(() => null);
@@ -3121,10 +3198,16 @@ export const tools = (sdk) => [
             open_positions: totalOpenPositions,
             total_exposure_ton: parseFloat(totalExposureTon.toFixed(4)),
             realized_pnl_usd: parseFloat(realizedPnl.toFixed(4)),
-            total_closed_trades: closedTrades.length,
-            win_count: winCount,
-            loss_count: lossCount,
-            win_rate: winRate != null ? parseFloat(winRate.toFixed(4)) : null,
+            total_closed_trades: stats.total,
+            win_count: stats.win,
+            loss_count: stats.loss,
+            // breakeven (pnl == 0) and unscored (pnl never recorded) trades are
+            // surfaced so the books always reconcile: win + loss + breakeven +
+            // unscored === total_closed_trades (issue #182).
+            breakeven_count: stats.breakeven,
+            unscored_count: stats.unscored,
+            // Win rate over decisive trades only (wins + losses); null when none.
+            win_rate: stats.winRate != null ? parseFloat(stats.winRate.toFixed(4)) : null,
             open_trades: openTrades.map((t) => ({
               trade_id: t.id,
               mode: t.mode,
@@ -3749,18 +3832,18 @@ export const tools = (sdk) => [
           };
         }
 
-        const totalPnl = trades.reduce((s, t) => s + (t.pnl ?? 0), 0);
-        const wins = trades.filter((t) => (t.pnl ?? 0) > 0);
-        const losses = trades.filter((t) => (t.pnl ?? 0) < 0);
-        const winRate = trades.length > 0 ? wins.length / trades.length : 0;
+        // Same unit-safe classifier as the portfolio summary so the books
+        // reconcile and unscored (null-pnl) trades never dilute the averages.
+        const stats = summarizeClosedPnl(trades);
+        const totalPnl = stats.realizedPnl;
+        const avgWin = stats.avgWin;
+        const avgLoss = stats.avgLoss;
 
-        const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + (t.pnl ?? 0), 0) / wins.length : 0;
-        const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + (t.pnl ?? 0), 0) / losses.length : 0;
+        const bestTrade = trades.reduce((best, t) => (toFiniteNumber(t.pnl) ?? 0) > (toFiniteNumber(best.pnl) ?? 0) ? t : best, trades[0]);
+        const worstTrade = trades.reduce((worst, t) => (toFiniteNumber(t.pnl) ?? 0) < (toFiniteNumber(worst.pnl) ?? 0) ? t : worst, trades[0]);
 
-        const bestTrade = trades.reduce((best, t) => (t.pnl ?? 0) > (best.pnl ?? 0) ? t : best, trades[0]);
-        const worstTrade = trades.reduce((worst, t) => (t.pnl ?? 0) < (worst.pnl ?? 0) ? t : worst, trades[0]);
-
-        const profitFactor = avgLoss !== 0 ? Math.abs(avgWin / avgLoss) : null;
+        // Profit factor = gross profit / gross loss (both over decisive trades).
+        const profitFactor = stats.grossLoss !== 0 ? Math.abs(stats.grossProfit / stats.grossLoss) : null;
 
         // Daily P&L breakdown
         const dailyPnl = {};
@@ -3774,11 +3857,13 @@ export const tools = (sdk) => [
           data: {
             mode,
             period_days: days,
-            total_trades: trades.length,
+            total_trades: stats.total,
             open_positions: openTrades?.count ?? 0,
-            win_count: wins.length,
-            loss_count: losses.length,
-            win_rate: parseFloat(winRate.toFixed(4)),
+            win_count: stats.win,
+            loss_count: stats.loss,
+            breakeven_count: stats.breakeven,
+            unscored_count: stats.unscored,
+            win_rate: stats.winRate != null ? parseFloat(stats.winRate.toFixed(4)) : null,
             total_pnl_usd: parseFloat(totalPnl.toFixed(4)),
             avg_win_usd: parseFloat(avgWin.toFixed(4)),
             avg_loss_usd: parseFloat(avgLoss.toFixed(4)),
