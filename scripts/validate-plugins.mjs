@@ -217,6 +217,18 @@ for (const name of pluginDirs) {
     continue;
   }
 
+  // 3b. If index.js also exports a manifest with a version, it must match
+  //     manifest.json. A mismatch makes the agent report a stale installed
+  //     version, so the "Update" button keeps reappearing (issue #186).
+  if (mod.manifest && mod.manifest.version !== undefined &&
+      mod.manifest.version !== manifest.version) {
+    error(
+      name,
+      `index.js manifest.version "${mod.manifest.version}" does not match ` +
+        `manifest.json version "${manifest.version}"`
+    );
+  }
+
   // 4. Resolve tools (array or function)
   let toolList;
   if (typeof mod.tools === "function") {
