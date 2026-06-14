@@ -11,6 +11,7 @@ import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { resolve, join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 const PLUGIN_DIR = resolve("plugins/ton-trading-bot");
 const PLUGIN_URL = pathToFileURL(join(PLUGIN_DIR, "index.js")).href;
@@ -289,6 +290,20 @@ describe("ton-trading-bot plugin", () => {
 
     it("manifest has version", () => {
       assert.ok(mod.manifest.version, "manifest.version should exist");
+    });
+
+    it("index.js manifest version matches manifest.json (prevents stuck update button, issue #186)", async () => {
+      const manifestJson = JSON.parse(
+        await readFile(join(PLUGIN_DIR, "manifest.json"), "utf8")
+      );
+      assert.equal(
+        mod.manifest.version,
+        manifestJson.version,
+        `index.js manifest.version (${mod.manifest.version}) must match ` +
+          `manifest.json version (${manifestJson.version}); a mismatch makes ` +
+          `the agent report a stale installed version, so the "Update" button ` +
+          `keeps reappearing after every update.`
+      );
     });
 
     it("manifest has sdkVersion", () => {

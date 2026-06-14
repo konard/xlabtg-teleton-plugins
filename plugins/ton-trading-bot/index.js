@@ -79,7 +79,7 @@
 
 export const manifest = {
   name: "ton-trading-bot",
-  version: "2.3.0",
+  version: "2.4.1",
   sdkVersion: ">=1.0.0",
   description: "Atomic TON trading tools: market data, portfolio, risk validation, simulation, DEX swap execution, cross-DEX arbitrage, sniper trading, copy trading, liquidity pools, farming, backtesting, and risk management.",
   defaultConfig: {
