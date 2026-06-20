@@ -248,6 +248,14 @@
       "author": "xlabtg",
       "tags": ["defi", "ton", "dex", "swap", "liquidity", "concentrated-liquidity", "amm"],
       "path": "plugins/tonco-dex"
+    },
+    {
+      "id": "polymarket",
+      "name": "Polymarket",
+      "description": "Trade Polymarket prediction markets from your TON wallet — markets, orders, positions, balance, and TON ↔ USDC (Polygon) bridging via ChangeNOW",
+      "author": "Teleton Community",
+      "tags": ["polymarket", "prediction-markets", "trading", "defi", "ton", "polygon", "bridge"],
+      "path": "plugins/polymarket"
     }
   ]
 }

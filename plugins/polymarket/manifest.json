@@ -1,0 +1,49 @@
+{
+  "id": "polymarket",
+  "name": "Polymarket",
+  "version": "1.0.0",
+  "description": "Trade Polymarket prediction markets from your TON wallet: list/inspect markets, place/cancel orders, manage positions and balance, and bridge TON ↔ USDC (Polygon) via ChangeNOW.",
+  "author": {
+    "name": "Teleton Community",
+    "url": "https://github.com/xlabtg"
+  },
+  "license": "MIT",
+  "entry": "index.js",
+  "teleton": ">=1.0.0",
+  "sdkVersion": ">=1.0.0",
+  "permissions": ["network", "secrets", "database"],
+  "secrets": {
+    "EVM_PRIVATE_KEY": {
+      "required": true,
+      "description": "Dedicated Polygon EVM private key (0x + 64 hex) used to sign Polymarket orders and USDC transfers."
+    },
+    "POLY_API_KEY": { "required": true, "description": "Polymarket CLOB API key." },
+    "POLY_API_SECRET": { "required": true, "description": "Polymarket CLOB API secret (base64url HMAC key)." },
+    "POLY_API_PASSPHRASE": { "required": true, "description": "Polymarket CLOB API passphrase." },
+    "CHANGENOW_API_KEY": { "required": true, "description": "ChangeNOW API key for the TON ↔ USDC bridge." }
+  },
+  "defaultConfig": {
+    "network": "mainnet",
+    "max_swap_ton": 100,
+    "max_order_usdc": 500,
+    "require_confirmation_above_usdc": 50,
+    "default_slippage_bps": 100,
+    "changenow_from_network": "ton",
+    "changenow_to_network": "matic"
+  },
+  "tools": [
+    { "name": "polymarket_list_markets", "description": "List active Polymarket markets ordered by volume, optionally filtered by tag" },
+    { "name": "polymarket_get_market", "description": "Get a single Polymarket market by slug with outcomes, prices, and token ids" },
+    { "name": "polymarket_get_orderbook", "description": "Get the live CLOB order book for an outcome token" },
+    { "name": "polymarket_place_order", "description": "Place a limit order on a Polymarket outcome (BUY/SELL, price, size)" },
+    { "name": "polymarket_cancel_order", "description": "Cancel an open Polymarket order by id" },
+    { "name": "polymarket_get_positions", "description": "Get current Polymarket positions for the plugin EVM wallet" },
+    { "name": "polymarket_get_balance", "description": "Get USDC (Polygon) and TON balances for the trading wallets" },
+    { "name": "polymarket_deposit", "description": "Bridge TON to USDC on Polygon to fund Polymarket trading (ChangeNOW)" },
+    { "name": "polymarket_withdraw", "description": "Bridge USDC on Polygon back to TON (ChangeNOW)" },
+    { "name": "polymarket_swap_status", "description": "Check the status of a ChangeNOW bridge swap by id" }
+  ],
+  "tags": ["polymarket", "prediction-markets", "trading", "defi", "ton", "polygon", "bridge"],
+  "repository": "https://github.com/xlabtg/teleton-plugins",
+  "funding": null
+}
