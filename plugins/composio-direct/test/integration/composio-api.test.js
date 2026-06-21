@@ -207,11 +207,11 @@ describe("multi-execute batching", () => {
   });
 
   it("stops after first failure with fail_fast=true", async () => {
-    // Return 401 (API-key error) which is NOT retried, so the first tool definitely fails
+    // Return a non-auth API error so this test only covers fail_fast behavior.
     let callCount = 0;
     const restore = mockFetchFactory(async () => {
       callCount++;
-      return { status: 401, data: { message: "Unauthorized" } };
+      return { status: 400, data: { message: "Bad request" } };
     });
 
     try {

@@ -109,8 +109,9 @@ describe("composio-direct Teleton integration", () => {
     const sdk = makeSdk();
     const toolList = toolsFactory(sdk);
 
-    assert.equal(manifest.version, "1.9.2");
+    assert.equal(manifest.version, "1.9.3");
     assert.equal(manifest.defaultConfig.base_url, "https://backend.composio.dev/api/v3.1");
+    assert.equal(manifest.defaultConfig.api_key_auth_scheme, "auto");
     assert.deepEqual(
       toolList.map((tool) => tool.name).sort(),
       expectedToolNames
@@ -456,6 +457,121 @@ describe("composio-direct Teleton integration", () => {
       assert.equal(result.auth, undefined);
       assert.match(result.error, /API key/i);
       assert.match(result.error, /permissions/i);
+    } finally {
+      restore();
+    }
+  });
+
+  it("retries execute with x-user-api-key when x-api-key is forbidden", async () => {
+    const { calls, restore } = mockFetch((call, idx) => {
+      if (idx === 1) {
+        assert.equal(call.headers["x-api-key"], "test-api-key");
+        assert.equal(call.headers["x-user-api-key"], undefined);
+        return {
+          status: 403,
+          data: {
+            error: {
+              message: "The API key doesn't have permissions to perform the request.",
+              slug: "HTTP_Forbidden",
+              status: 403,
+            },
+          },
+        };
+      }
+
+      assert.equal(call.headers["x-api-key"], undefined);
+      assert.equal(call.headers["x-user-api-key"], "test-api-key");
+      return {
+        status: 200,
+        data: {
+          successful: true,
+          data: { ok: true },
+        },
+      };
+    });
+
+    try {
+      const executeTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        { tool_slug: "github_list_repos", parameters: {} },
+        makeContext()
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.data.ok, true);
+      assert.equal(calls.length, 2);
+    } finally {
+      restore();
+    }
+  });
+
+  it("uses x-user-api-key first when api_key_auth_scheme is user", async () => {
+    const { calls, restore } = mockFetch((call) => {
+      assert.equal(call.headers["x-api-key"], undefined);
+      assert.equal(call.headers["x-user-api-key"], "test-api-key");
+      return {
+        status: 200,
+        data: {
+          successful: true,
+          data: { ok: true },
+        },
+      };
+    });
+
+    try {
+      const executeTool = toolsFactory(
+        makeSdk({ pluginConfig: { api_key_auth_scheme: "user" } })
+      ).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        { tool_slug: "github_list_repos", parameters: {} },
+        makeContext()
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.data.ok, true);
+      assert.equal(calls.length, 1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("keeps the actionable x-api-key 403 when x-user-api-key fallback is also rejected", async () => {
+    const { calls, restore } = mockFetch((call, idx) => {
+      if (idx === 1) {
+        assert.equal(call.headers["x-api-key"], "test-api-key");
+        assert.equal(call.headers["x-user-api-key"], undefined);
+        return {
+          status: 403,
+          data: {
+            error: {
+              message: "The API key doesn't have permissions to perform the request.",
+              slug: "HTTP_Forbidden",
+              status: 403,
+            },
+          },
+        };
+      }
+
+      assert.equal(call.headers["x-api-key"], undefined);
+      assert.equal(call.headers["x-user-api-key"], "test-api-key");
+      return {
+        status: 401,
+        data: { message: "Unauthorized" },
+      };
+    });
+
+    try {
+      const executeTool = toolsFactory(makeSdk()).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        { tool_slug: "github_list_repos", parameters: {} },
+        makeContext()
+      );
+
+      assert.equal(result.success, false);
+      assert.equal(result.auth, undefined);
+      assert.match(result.error, /permission denied/i);
+      assert.match(result.error, /permissions/i);
+      assert.equal(calls.length, 2);
     } finally {
       restore();
     }
