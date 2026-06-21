@@ -1,8 +1,8 @@
 {
   "id": "composio-direct",
   "name": "Composio Direct",
-  "version": "1.9.0",
-  "description": "Direct access to 1000+ Composio automation tools plus v3 toolkits, files, triggers, webhooks, connection reuse, and meta-tools without MCP transport",
+  "version": "1.9.1",
+  "description": "Direct access to 1000+ Composio automation tools plus v3.1 toolkits, files, triggers, webhooks, connection reuse, and meta-tools without MCP transport",
   "author": {
     "name": "xlabtg",
     "url": "https://github.com/xlabtg"
@@ -19,7 +19,7 @@
     }
   },
   "defaultConfig": {
-    "base_url": "https://backend.composio.dev/api/v3",
+    "base_url": "https://backend.composio.dev/api/v3.1",
     "timeout_ms": 30000,
     "max_parallel_executions": 10,
     "tool_version": "latest",
