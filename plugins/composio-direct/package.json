@@ -1,7 +1,7 @@
 {
   "name": "teleton-plugin-composio-direct",
   "type": "module",
-  "version": "1.9.2",
+  "version": "1.9.3",
   "private": true,
   "description": "Teleton plugin for direct Composio API access"
 }
