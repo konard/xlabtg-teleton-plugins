@@ -29,7 +29,7 @@ function makeSdk({ apiKey = "test-api-key", config = {} } = {}) {
       },
     },
     config: {
-      base_url: "https://backend.composio.dev/api/v3",
+      base_url: "https://backend.composio.dev/api/v3.1",
       timeout_ms: 5000,
       max_parallel_executions: 10,
       ...config,
@@ -149,13 +149,13 @@ describe("manifest", () => {
     assert.ok(manifest.name, "manifest.name is set");
     assert.ok(manifest.version, "manifest.version is set");
     assert.ok(manifest.secrets?.composio_api_key, "secret composio_api_key declared");
-    assert.equal(manifest.version, "1.9.0");
-    assert.equal(manifest.defaultConfig?.base_url, "https://backend.composio.dev/api/v3");
+    assert.equal(manifest.version, "1.9.1");
+    assert.equal(manifest.defaultConfig?.base_url, "https://backend.composio.dev/api/v3.1");
   });
 });
 
 describe("tools factory", () => {
-  it("returns Composio v3 API domain, meta-tool, and execution tools when called with sdk", () => {
+  it("returns Composio v3.1 API domain, meta-tool, and execution tools when called with sdk", () => {
     const sdk = makeSdk();
     const toolList = toolsFactory(sdk);
     const names = toolList.map((t) => t.name);

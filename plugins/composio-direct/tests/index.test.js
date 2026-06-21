@@ -46,7 +46,7 @@ function makeSdk({ apiKey = "test-api-key", pluginConfig = {} } = {}) {
       },
     },
     pluginConfig: {
-      base_url: "https://backend.composio.dev/api/v3",
+      base_url: "https://backend.composio.dev/api/v3.1",
       timeout_ms: 1000,
       max_parallel_executions: 5,
       tool_version: "latest",
@@ -109,8 +109,8 @@ describe("composio-direct Teleton integration", () => {
     const sdk = makeSdk();
     const toolList = toolsFactory(sdk);
 
-    assert.equal(manifest.version, "1.9.0");
-    assert.equal(manifest.defaultConfig.base_url, "https://backend.composio.dev/api/v3");
+    assert.equal(manifest.version, "1.9.1");
+    assert.equal(manifest.defaultConfig.base_url, "https://backend.composio.dev/api/v3.1");
     assert.deepEqual(
       toolList.map((tool) => tool.name).sort(),
       expectedToolNames
@@ -207,7 +207,7 @@ describe("composio-direct Teleton integration", () => {
       assert.equal(result.data.log_id, "log_123");
 
       const url = new URL(calls[0].url);
-      assert.equal(url.pathname, "/api/v3/tools/execute/GITHUB_LIST_REPOS");
+      assert.equal(url.pathname, "/api/v3.1/tools/execute/GITHUB_LIST_REPOS");
       assert.deepEqual(calls[0].body, {
         user_id: "user-42",
         arguments: { owner: "xlabtg" },
@@ -218,7 +218,7 @@ describe("composio-direct Teleton integration", () => {
     }
   });
 
-  it("retries current v3 execute API when legacy v3.1 reports unknown tool", async () => {
+  it("retries paired v3 execute API when v3.1 reports unknown tool", async () => {
     const { calls, restore } = mockFetch((call, idx) => {
       if (idx === 1) {
         return {
@@ -260,6 +260,48 @@ describe("composio-direct Teleton integration", () => {
     }
   });
 
+  it("retries current v3.1 execute API when legacy v3 reports unknown tool", async () => {
+    const { calls, restore } = mockFetch((call, idx) => {
+      if (idx === 1) {
+        return {
+          status: 404,
+          data: {
+            error: {
+              message: "Unknown tool",
+              slug: "UNKNOWN_TOOL",
+              status: 404,
+            },
+          },
+        };
+      }
+      return {
+        status: 200,
+        data: {
+          successful: true,
+          data: { ok: true },
+        },
+      };
+    });
+
+    try {
+      const executeTool = toolsFactory(
+        makeSdk({ pluginConfig: { base_url: "https://backend.composio.dev/api/v3" } })
+      ).find((tool) => tool.name === "composio_execute_tool");
+      const result = await executeTool.execute(
+        { tool_slug: "github_list_repos", parameters: {} },
+        makeContext()
+      );
+
+      assert.equal(result.success, true);
+      assert.equal(result.data.ok, true);
+      assert.equal(calls.length, 2);
+      assert.equal(new URL(calls[0].url).pathname, "/api/v3/tools/execute/GITHUB_LIST_REPOS");
+      assert.equal(new URL(calls[1].url).pathname, "/api/v3.1/tools/execute/GITHUB_LIST_REPOS");
+    } finally {
+      restore();
+    }
+  });
+
   it("passes connected_account_id as a top-level execute field, not inside arguments", async () => {
     const { calls, restore } = mockFetch(() => ({
       status: 200,
@@ -283,7 +325,7 @@ describe("composio-direct Teleton integration", () => {
       assert.equal(result.success, true);
       assert.equal(calls[0].body.connected_account_id, "ca_lc9TestLuaI");
       assert.equal(calls[0].body.user_id, "user-42");
-      // connected_account_id is a top-level execute field per the Composio v3 API.
+      // connected_account_id is a top-level execute field per the Composio v3.1 API.
       // It must NOT pollute the tool arguments, or strict tool schemas
       // (additionalProperties: false) reject the call.
       assert.deepEqual(calls[0].body.arguments, { symbol: "BTC" });
@@ -494,7 +536,7 @@ describe("composio-direct Teleton integration", () => {
   it("fetches tool schemas through the current /tools/{tool_slug} API", async () => {
     const { calls, restore } = mockFetch((call) => {
       const url = new URL(call.url);
-      assert.equal(url.pathname, "/api/v3/tools/GITHUB_CREATE_ISSUE");
+      assert.equal(url.pathname, "/api/v3.1/tools/GITHUB_CREATE_ISSUE");
       assert.equal(url.searchParams.get("version"), "latest");
       assert.equal(url.searchParams.get("toolkit_versions"), "latest");
       return {
@@ -539,7 +581,7 @@ describe("composio-direct Teleton integration", () => {
   it("lists current-user connected accounts with documented filters", async () => {
     const { calls, restore } = mockFetch((call) => {
       const url = new URL(call.url);
-      assert.equal(url.pathname, "/api/v3/connected_accounts");
+      assert.equal(url.pathname, "/api/v3.1/connected_accounts");
       assert.deepEqual(url.searchParams.getAll("toolkit_slugs"), ["github"]);
       assert.deepEqual(url.searchParams.getAll("statuses"), ["ACTIVE"]);
       assert.deepEqual(url.searchParams.getAll("user_ids"), ["user-42"]);
@@ -590,7 +632,7 @@ describe("composio-direct Teleton integration", () => {
   it("gets a connected account without exposing state values", async () => {
     const { calls, restore } = mockFetch((call) => {
       const url = new URL(call.url);
-      assert.equal(url.pathname, "/api/v3/connected_accounts/ca_123");
+      assert.equal(url.pathname, "/api/v3.1/connected_accounts/ca_123");
       return {
         status: 200,
         data: {
@@ -624,7 +666,7 @@ describe("composio-direct Teleton integration", () => {
   it("lists toolkits through the current /toolkits API", async () => {
     const { calls, restore } = mockFetch((call) => {
       const url = new URL(call.url);
-      assert.equal(url.pathname, "/api/v3/toolkits");
+      assert.equal(url.pathname, "/api/v3.1/toolkits");
       assert.equal(url.searchParams.get("search"), "github");
       assert.equal(url.searchParams.get("category"), "developer-tools");
       assert.equal(url.searchParams.get("managed_by"), "composio");
@@ -680,7 +722,7 @@ describe("composio-direct Teleton integration", () => {
   it("gets one toolkit through /toolkits/{slug}", async () => {
     const { calls, restore } = mockFetch((call) => {
       const url = new URL(call.url);
-      assert.equal(url.pathname, "/api/v3/toolkits/github");
+      assert.equal(url.pathname, "/api/v3.1/toolkits/github");
       assert.equal(url.searchParams.get("version"), "latest");
       return {
         status: 200,
@@ -712,7 +754,7 @@ describe("composio-direct Teleton integration", () => {
     const { calls, restore } = mockFetch((call, idx) => {
       const url = new URL(call.url);
       if (idx === 1) {
-        assert.equal(url.pathname, "/api/v3/files/list");
+        assert.equal(url.pathname, "/api/v3.1/files/list");
         assert.equal(url.searchParams.get("toolkit_slug"), "gmail");
         assert.equal(url.searchParams.get("tool_slug"), "GMAIL_SEND_EMAIL");
         assert.equal(url.searchParams.get("limit"), "25");
@@ -733,7 +775,7 @@ describe("composio-direct Teleton integration", () => {
         };
       }
 
-      assert.equal(url.pathname, "/api/v3/files/upload/request");
+      assert.equal(url.pathname, "/api/v3.1/files/upload/request");
       assert.deepEqual(call.body, {
         toolkit_slug: "gmail",
         tool_slug: "GMAIL_SEND_EMAIL",
@@ -783,11 +825,11 @@ describe("composio-direct Teleton integration", () => {
     }
   });
 
-  it("lists trigger types, active triggers, and upserts trigger instances through v3 endpoints", async () => {
+  it("lists trigger types, active triggers, and upserts trigger instances through v3.1 endpoints", async () => {
     const { calls, restore } = mockFetch((call, idx) => {
       const url = new URL(call.url);
       if (idx === 1) {
-        assert.equal(url.pathname, "/api/v3/triggers_types");
+        assert.equal(url.pathname, "/api/v3.1/triggers_types");
         assert.deepEqual(url.searchParams.getAll("toolkit_slugs"), ["slack"]);
         assert.equal(url.searchParams.get("toolkit_versions"), "latest");
         return {
@@ -807,7 +849,7 @@ describe("composio-direct Teleton integration", () => {
         };
       }
       if (idx === 2) {
-        assert.equal(url.pathname, "/api/v3/trigger_instances/active");
+        assert.equal(url.pathname, "/api/v3.1/trigger_instances/active");
         assert.deepEqual(url.searchParams.getAll("user_ids"), ["user-42"]);
         assert.deepEqual(url.searchParams.getAll("trigger_names"), ["SLACK_RECEIVE_MESSAGE"]);
         assert.equal(url.searchParams.get("show_disabled"), "true");
@@ -827,7 +869,7 @@ describe("composio-direct Teleton integration", () => {
         };
       }
 
-      assert.equal(url.pathname, "/api/v3/trigger_instances/SLACK_RECEIVE_MESSAGE/upsert");
+      assert.equal(url.pathname, "/api/v3.1/trigger_instances/SLACK_RECEIVE_MESSAGE/upsert");
       assert.deepEqual(call.body, {
         connected_account_id: "ca_123",
         trigger_config: { channel_id: "C123" },
@@ -869,18 +911,18 @@ describe("composio-direct Teleton integration", () => {
     }
   });
 
-  it("manages trigger status and deletion through v3 trigger manage endpoints", async () => {
+  it("manages trigger status and deletion through v3.1 trigger manage endpoints", async () => {
     const { calls, restore } = mockFetch((call, idx) => {
       const url = new URL(call.url);
       if (idx === 1) {
         assert.equal(call.method, "PATCH");
-        assert.equal(url.pathname, "/api/v3/trigger_instances/manage/trig_123");
+        assert.equal(url.pathname, "/api/v3.1/trigger_instances/manage/trig_123");
         assert.deepEqual(call.body, { status: "disable" });
         return { status: 200, data: { success: true } };
       }
 
       assert.equal(call.method, "DELETE");
-      assert.equal(url.pathname, "/api/v3/trigger_instances/manage/trig_123");
+      assert.equal(url.pathname, "/api/v3.1/trigger_instances/manage/trig_123");
       return { status: 200, data: { success: true } };
     });
 
@@ -907,7 +949,7 @@ describe("composio-direct Teleton integration", () => {
     const { calls, restore } = mockFetch((call, idx) => {
       const url = new URL(call.url);
       if (idx === 1) {
-        assert.equal(url.pathname, "/api/v3/webhook_subscriptions/event_types");
+        assert.equal(url.pathname, "/api/v3.1/webhook_subscriptions/event_types");
         return {
           status: 200,
           data: {
@@ -923,7 +965,7 @@ describe("composio-direct Teleton integration", () => {
       }
       if (idx === 2) {
         assert.equal(call.method, "POST");
-        assert.equal(url.pathname, "/api/v3/webhook_subscriptions");
+        assert.equal(url.pathname, "/api/v3.1/webhook_subscriptions");
         assert.deepEqual(call.body, {
           webhook_url: "https://agent.example.test/composio",
           enabled_events: ["trigger.event_received"],
@@ -942,7 +984,7 @@ describe("composio-direct Teleton integration", () => {
       }
       if (idx === 3) {
         assert.equal(call.method, "PATCH");
-        assert.equal(url.pathname, "/api/v3/webhook_subscriptions/wh_123");
+        assert.equal(url.pathname, "/api/v3.1/webhook_subscriptions/wh_123");
         return {
           status: 200,
           data: {
@@ -956,7 +998,7 @@ describe("composio-direct Teleton integration", () => {
       }
 
       assert.equal(call.method, "POST");
-      assert.equal(url.pathname, "/api/v3/webhook_subscriptions/wh_123/rotate_secret");
+      assert.equal(url.pathname, "/api/v3.1/webhook_subscriptions/wh_123/rotate_secret");
       return {
         status: 200,
         data: {
@@ -1010,7 +1052,7 @@ describe("composio-direct Teleton integration", () => {
     const { calls, restore } = mockFetch((call, idx) => {
       const url = new URL(call.url);
       if (idx === 1) {
-        assert.equal(url.pathname, "/api/v3/tools/execute/COMPOSIO_MANAGE_CONNECTIONS");
+        assert.equal(url.pathname, "/api/v3.1/tools/execute/COMPOSIO_MANAGE_CONNECTIONS");
         assert.deepEqual(call.body.arguments, {
           toolkits: ["github", "gmail"],
           reinitiate_all: true,
@@ -1019,13 +1061,13 @@ describe("composio-direct Teleton integration", () => {
         return { status: 200, data: { successful: true, data: { connected: ["github"] } } };
       }
       if (idx === 2) {
-        assert.equal(url.pathname, "/api/v3/tools/execute/COMPOSIO_REMOTE_BASH_TOOL");
+        assert.equal(url.pathname, "/api/v3.1/tools/execute/COMPOSIO_REMOTE_BASH_TOOL");
         assert.equal(call.body.arguments.command, "pwd");
         assert.equal(call.body.arguments.session_id, "sess_123");
         return { status: 200, data: { successful: true, data: { stdout: "/workspace" } } };
       }
 
-      assert.equal(url.pathname, "/api/v3/tools/execute/COMPOSIO_REMOTE_WORKBENCH");
+      assert.equal(url.pathname, "/api/v3.1/tools/execute/COMPOSIO_REMOTE_WORKBENCH");
       assert.equal(call.body.arguments.code_to_execute, "print(1)");
       assert.equal(call.body.arguments.current_step, "RUNNING_CODE");
       return { status: 200, data: { successful: true, data: { result: 1 } } };

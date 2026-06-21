@@ -1,6 +1,6 @@
 # Composio Direct Agent Guide
 
-Use `composio-direct` when a user asks Teleton to work with an external app supported by Composio, such as GitHub, Gmail, Slack, Notion, Linear, Jira, Google Calendar, Google Drive, or a remote shell/workbench. The plugin talks directly to Composio v3 and exposes Composio tool slugs through Teleton tools. A returned Composio `tool_slug` is not a Teleton tool name; execute it through `composio_execute_tool` or `composio_multi_execute`.
+Use `composio-direct` when a user asks Teleton to work with an external app supported by Composio, such as GitHub, Gmail, Slack, Notion, Linear, Jira, Google Calendar, Google Drive, or a remote shell/workbench. The plugin talks directly to Composio v3.1 and exposes Composio tool slugs through Teleton tools. A returned Composio `tool_slug` is not a Teleton tool name; execute it through `composio_execute_tool` or `composio_multi_execute`.
 
 ## Required Setup
 
@@ -10,7 +10,7 @@ Default runtime settings:
 
 | Setting | Default | Use |
 |---|---:|---|
-| `base_url` | `https://backend.composio.dev/api/v3` | Composio API endpoint |
+| `base_url` | `https://backend.composio.dev/api/v3.1` | Composio API endpoint |
 | `timeout_ms` | `30000` | Default request timeout |
 | `max_parallel_executions` | `10` | Batch execution concurrency |
 | `tool_version` | `latest` | Tool execution/schema version |
@@ -97,7 +97,7 @@ Rules for execution:
 - Use exact schema field names from `composio_get_tool_schemas`.
 - Include `connected_account_id` when the user has multiple accounts or when a connection lookup returned a clear match.
 - Use `timeout_override_ms` only for operations expected to exceed the plugin default.
-- When a slug fails because a legacy `/api/v3.1` base URL reports an unknown tool, the plugin retries against current `/api/v3` automatically.
+- When a slug fails because a legacy `/api/v3` base URL reports an unknown tool, the plugin retries against current `/api/v3.1` automatically. If an explicitly configured `/api/v3.1` route reports the same transitional error, the plugin also retries the paired `/api/v3` route.
 
 ## Batch Execution
 

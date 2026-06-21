@@ -7,7 +7,7 @@ Direct integration with **1000+ Composio automation tools** — no MCP transport
 - **27 focused tools** covering discovery, schema lookup, execution, batch execution, OAuth authorization, connection reuse, toolkits, files, triggers, webhooks, and meta-tools
 - **Retry logic** — 3 attempts with exponential backoff (1 s, 2 s, 4 s) for network and 5xx errors
 - **Auth error handling** — returns structured `connect_url` when a service needs authorization
-- **Schema lookup** — retrieves exact input/output schemas from the v3 `tools/{tool_slug}` API
+- **Schema lookup** — retrieves exact input/output schemas from the v3.1 `tools/{tool_slug}` API
 - **Connection management** — lists and fetches existing connected accounts so the agent can reuse them
 - **Toolkit discovery** — lists all Composio applications and fetches versioned toolkit metadata
 - **Files API** — lists registered files and requests presigned upload URLs for file-bearing tools
@@ -31,7 +31,7 @@ For container and CI deployments, Teleton also resolves the secret from `COMPOSI
 # config.yaml example
 plugins:
   composio_direct:
-    base_url: "https://backend.composio.dev/api/v3"    # optional
+    base_url: "https://backend.composio.dev/api/v3.1"    # optional
     timeout_ms: 30000                                  # optional (default: 30s)
     max_parallel_executions: 10                        # optional (default: 10)
     tool_version: "latest"                             # optional
@@ -271,10 +271,10 @@ For normal reuse, prefer `composio_list_connections` first. Use this wrapper whe
 
 `composio_list_toolkits` lists available Composio toolkits/applications with auth schemes, categories, tool counts, and trigger counts. `composio_get_toolkit` fetches one toolkit by slug.
 
-| Tool | Required parameters | v3 endpoint |
+| Tool | Required parameters | v3.1 endpoint |
 |---|---|---|
-| `composio_list_toolkits` | none | `GET /api/v3/toolkits` |
-| `composio_get_toolkit` | `toolkit` | `GET /api/v3/toolkits/{slug}` |
+| `composio_list_toolkits` | none | `GET /api/v3.1/toolkits` |
+| `composio_get_toolkit` | `toolkit` | `GET /api/v3.1/toolkits/{slug}` |
 
 **Example:**
 ```json
@@ -303,10 +303,10 @@ For normal reuse, prefer `composio_list_connections` first. Use this wrapper whe
 
 Use `composio_list_files` to inspect registered files and `composio_request_file_upload` to request a presigned upload URL before passing a file to a Composio tool.
 
-| Tool | Required parameters | v3 endpoint |
+| Tool | Required parameters | v3.1 endpoint |
 |---|---|---|
-| `composio_list_files` | none | `GET /api/v3/files/list` |
-| `composio_request_file_upload` | `toolkit`, `tool_slug`, `filename`, `mimetype`, `md5` | `POST /api/v3/files/upload/request` |
+| `composio_list_files` | none | `GET /api/v3.1/files/list` |
+| `composio_request_file_upload` | `toolkit`, `tool_slug`, `filename`, `mimetype`, `md5` | `POST /api/v3.1/files/upload/request` |
 
 **Upload request example:**
 ```json
@@ -325,14 +325,14 @@ Use `composio_list_files` to inspect registered files and `composio_request_file
 
 Triggers let the Teleton Agent discover event schemas and manage user-scoped automation instances.
 
-| Tool | Required parameters | v3 endpoint |
+| Tool | Required parameters | v3.1 endpoint |
 |---|---|---|
-| `composio_list_trigger_types` | none | `GET /api/v3/triggers_types` |
-| `composio_get_trigger_type` | `trigger_slug` | `GET /api/v3/triggers_types/{slug}` |
-| `composio_list_triggers` | none | `GET /api/v3/trigger_instances/active` |
-| `composio_upsert_trigger` | `trigger_slug`, `connected_account_id`, `trigger_config` | `POST /api/v3/trigger_instances/{slug}/upsert` |
-| `composio_set_trigger_status` | `trigger_id`, `status` or `enabled` | `PATCH /api/v3/trigger_instances/manage/{trigger_id}` |
-| `composio_delete_trigger` | `trigger_id` | `DELETE /api/v3/trigger_instances/manage/{trigger_id}` |
+| `composio_list_trigger_types` | none | `GET /api/v3.1/triggers_types` |
+| `composio_get_trigger_type` | `trigger_slug` | `GET /api/v3.1/triggers_types/{slug}` |
+| `composio_list_triggers` | none | `GET /api/v3.1/trigger_instances/active` |
+| `composio_upsert_trigger` | `trigger_slug`, `connected_account_id`, `trigger_config` | `POST /api/v3.1/trigger_instances/{slug}/upsert` |
+| `composio_set_trigger_status` | `trigger_id`, `status` or `enabled` | `PATCH /api/v3.1/trigger_instances/manage/{trigger_id}` |
+| `composio_delete_trigger` | `trigger_id` | `DELETE /api/v3.1/trigger_instances/manage/{trigger_id}` |
 
 `composio_list_triggers` defaults to the current Teleton sender ID. Trigger `state` values are not returned; the response exposes only `state_keys`.
 
@@ -342,15 +342,15 @@ Triggers let the Teleton Agent discover event schemas and manage user-scoped aut
 
 Webhooks configure Composio event delivery for triggers and other platform events.
 
-| Tool | Required parameters | v3 endpoint |
+| Tool | Required parameters | v3.1 endpoint |
 |---|---|---|
-| `composio_list_webhook_events` | none | `GET /api/v3/webhook_subscriptions/event_types` |
-| `composio_list_webhooks` | none | `GET /api/v3/webhook_subscriptions` |
-| `composio_get_webhook` | `webhook_id` | `GET /api/v3/webhook_subscriptions/{id}` |
-| `composio_create_webhook` | `webhook_url`, `enabled_events` | `POST /api/v3/webhook_subscriptions` |
-| `composio_update_webhook` | `webhook_id` plus field to update | `PATCH /api/v3/webhook_subscriptions/{id}` |
-| `composio_rotate_webhook_secret` | `webhook_id` | `POST /api/v3/webhook_subscriptions/{id}/rotate_secret` |
-| `composio_delete_webhook` | `webhook_id` | `DELETE /api/v3/webhook_subscriptions/{id}` |
+| `composio_list_webhook_events` | none | `GET /api/v3.1/webhook_subscriptions/event_types` |
+| `composio_list_webhooks` | none | `GET /api/v3.1/webhook_subscriptions` |
+| `composio_get_webhook` | `webhook_id` | `GET /api/v3.1/webhook_subscriptions/{id}` |
+| `composio_create_webhook` | `webhook_url`, `enabled_events` | `POST /api/v3.1/webhook_subscriptions` |
+| `composio_update_webhook` | `webhook_id` plus field to update | `PATCH /api/v3.1/webhook_subscriptions/{id}` |
+| `composio_rotate_webhook_secret` | `webhook_id` | `POST /api/v3.1/webhook_subscriptions/{id}/rotate_secret` |
+| `composio_delete_webhook` | `webhook_id` | `DELETE /api/v3.1/webhook_subscriptions/{id}` |
 
 Webhook signing secrets are redacted by default. Set `include_secret: true` only when the caller needs the newly generated or rotated secret value.
 
@@ -358,7 +358,7 @@ Webhook signing secrets are redacted by default. Set `include_secret: true` only
 
 ### Remote meta-tools
 
-`composio_remote_bash` and `composio_remote_workbench` are wrappers around documented Composio meta-tools and route through the same `POST /api/v3/tools/execute/{tool_slug}` path as normal tool execution.
+`composio_remote_bash` and `composio_remote_workbench` are wrappers around documented Composio meta-tools and route through the same `POST /api/v3.1/tools/execute/{tool_slug}` path as normal tool execution.
 
 | Tool | Required parameters | Executed Composio slug |
 |---|---|---|
@@ -372,7 +372,7 @@ Webhook signing secrets are redacted by default. Set `include_secret: true` only
 
 Get an OAuth authorization link for a service.
 
-The tool creates a real Composio Connect Link through the v3 `auth_configs`
+The tool creates a real Composio Connect Link through the v3.1 `auth_configs`
 and `connected_accounts/link` APIs. For toolkits without Composio-managed auth,
 create an auth config in Composio and pass its ID as `auth_config_id`.
 
@@ -460,13 +460,13 @@ node --test plugins/composio-direct/test/unit/composio-direct.test.js \
 - All Composio API calls use HTTPS
 - Side-effecting tools are scoped to `dm-only` to prevent accidental side-effects in group chats
 
-## API v3 audit notes
+## API v3.1 audit notes
 
-- Existing compliant routes kept: `GET /api/v3/tools`, `POST /api/v3/tools/execute/{tool_slug}`, `GET/POST /api/v3/auth_configs`, and `POST /api/v3/connected_accounts/link`.
-- Added missing schema access through `GET /api/v3/tools/{tool_slug}` so the agent can validate parameters before execution.
-- Added missing connected account reads through `GET /api/v3/connected_accounts` and `GET /api/v3/connected_accounts/{nanoid}` so active connections can be reused instead of starting unnecessary auth flows.
-- Added toolkit coverage through `GET /api/v3/toolkits` and `GET /api/v3/toolkits/{slug}` so the agent can discover all available applications from the Composio catalog.
-- Added Files API coverage through `GET /api/v3/files/list` and `POST /api/v3/files/upload/request` for file-bearing tool workflows.
+- Current compliant routes use `GET /api/v3.1/tools`, `POST /api/v3.1/tools/execute/{tool_slug}`, `GET/POST /api/v3.1/auth_configs`, and `POST /api/v3.1/connected_accounts/link`.
+- Added missing schema access through `GET /api/v3.1/tools/{tool_slug}` so the agent can validate parameters before execution.
+- Added missing connected account reads through `GET /api/v3.1/connected_accounts` and `GET /api/v3.1/connected_accounts/{nanoid}` so active connections can be reused instead of starting unnecessary auth flows.
+- Added toolkit coverage through `GET /api/v3.1/toolkits` and `GET /api/v3.1/toolkits/{slug}` so the agent can discover all available applications from the Composio catalog.
+- Added Files API coverage through `GET /api/v3.1/files/list` and `POST /api/v3.1/files/upload/request` for file-bearing tool workflows.
 - Added Triggers API coverage through trigger type discovery, active trigger listing, trigger upsert, enable/disable, and delete endpoints.
 - Added Webhooks API coverage through event type discovery and webhook subscription CRUD/secret rotation endpoints.
 - Meta-tool alignment: `composio_search_tools`, `composio_get_tool_schemas`, `composio_multi_execute`, connection/auth tools, `composio_manage_connections`, `composio_remote_bash`, and `composio_remote_workbench` cover the practical `search_tools`, `get_tool_schemas`, `multi_execute_tool`, `manage_connections`, `remote_bash_tool`, and `remote_workbench` flows for Teleton.

@@ -23,7 +23,7 @@
  *   - Set COMPOSIO_DIRECT_COMPOSIO_API_KEY, COMPOSIO_API_KEY, or use the secrets store
  *
  * Transport:
- *   - Talks directly to the Composio v3 REST API over HTTPS
+ *   - Talks directly to the Composio v3.1 REST API over HTTPS
  *   - Self-contained: no npm dependencies, so there is no install step to fail
  *
  * Security:
@@ -38,13 +38,13 @@
  */
 
 // ---------------------------------------------------------------------------
-// Composio v3 API constants.
+// Composio v3.1 API constants.
 // This plugin talks to Composio over direct HTTPS calls (no npm dependency),
 // which keeps it self-contained and avoids any runtime install step that could
 // fail (for example "spawn npm ENOENT" when npm is not on PATH).
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BASE_URL = "https://backend.composio.dev/api/v3";
+const DEFAULT_BASE_URL = "https://backend.composio.dev/api/v3.1";
 const DEFAULT_TOOL_VERSION = "latest";
 const DEFAULT_TOOLKIT_VERSIONS = "latest";
 const COMPOSIO_MANAGED_AUTH_UNAVAILABLE_PATTERN =
@@ -64,10 +64,10 @@ const COMPOSIO_EXECUTION_GUIDANCE = {
 
 export const manifest = {
   name: "composio-direct",
-  version: "1.9.0",
+  version: "1.9.1",
   sdkVersion: ">=1.0.0",
   description:
-    "Direct access to 1000+ Composio automation tools plus v3 toolkits, files, triggers, webhooks, connection reuse, and meta-tools without MCP transport",
+    "Direct access to 1000+ Composio automation tools plus v3.1 toolkits, files, triggers, webhooks, connection reuse, and meta-tools without MCP transport",
   secrets: {
     composio_api_key: {
       required: true,
@@ -725,12 +725,16 @@ function isUnknownToolError(response) {
 }
 
 /**
- * Current Composio docs use /api/v3. Retry the current route when a user still
- * has the old v3.1 base URL configured and that route reports an unknown tool.
+ * Composio currently documents /api/v3.1. Retry the paired route when an
+ * explicit /api/v3 or /api/v3.1 configuration reports an unknown tool, so
+ * older deployments keep working during API-version transitions.
  * @param {string} baseUrl
  * @returns {string | null}
  */
-function getCurrentV3FallbackBaseUrl(baseUrl) {
+function getComposioApiFallbackBaseUrl(baseUrl) {
+  if (/\/api\/v3$/i.test(baseUrl)) {
+    return baseUrl.replace(/\/api\/v3$/i, "/api/v3.1");
+  }
   if (/\/api\/v3\.1$/i.test(baseUrl)) {
     return baseUrl.replace(/\/api\/v3\.1$/i, "/api/v3");
   }
@@ -805,7 +809,7 @@ export const tools = (sdk) => {
   }
 
   /**
-   * Execute a Composio v3 HTTP request using the plugin defaults.
+   * Execute a Composio v3.1 HTTP request using the plugin defaults.
    * @param {object} opts
    * @param {string} opts.apiKey
    * @param {string} opts.path
@@ -1275,10 +1279,10 @@ export const tools = (sdk) => {
           timeoutMs: effectiveTimeout,
           log: sdk.log,
         });
-        const fallbackBaseUrl = getCurrentV3FallbackBaseUrl(baseUrl);
+        const fallbackBaseUrl = getComposioApiFallbackBaseUrl(baseUrl);
         if (fallbackBaseUrl && isUnknownToolError(response)) {
           url = `${fallbackBaseUrl}/tools/execute/${encodeURIComponent(normalizedSlug)}`;
-          sdk.log.debug(`composio_execute_tool: retrying ${normalizedSlug} on current v3 API`);
+          sdk.log.debug(`composio_execute_tool: retrying ${normalizedSlug} on paired Composio API route`);
           response = await fetchWithRetry({
             url,
             method: "POST",
@@ -1472,10 +1476,10 @@ export const tools = (sdk) => {
               timeoutMs: effectiveTimeout,
               log: sdk.log,
             });
-            const fallbackBaseUrl = getCurrentV3FallbackBaseUrl(baseUrl);
+            const fallbackBaseUrl = getComposioApiFallbackBaseUrl(baseUrl);
             if (fallbackBaseUrl && isUnknownToolError(response)) {
               url = `${fallbackBaseUrl}/tools/execute/${encodeURIComponent(normalizedSlug)}`;
-              sdk.log.debug(`composio_multi_execute: retrying ${normalizedSlug} on current v3 API`);
+              sdk.log.debug(`composio_multi_execute: retrying ${normalizedSlug} on paired Composio API route`);
               response = await fetchWithRetry({
                 url,
                 method: "POST",
@@ -1940,7 +1944,7 @@ export const tools = (sdk) => {
   const composioListToolkits = {
     name: "composio_list_toolkits",
     description:
-      "List Composio v3 toolkits so the agent can discover available applications, auth modes, tool counts, trigger support, and categories.",
+      "List Composio v3.1 toolkits so the agent can discover available applications, auth modes, tool counts, trigger support, and categories.",
     category: "data-bearing",
 
     parameters: {
@@ -2030,7 +2034,7 @@ export const tools = (sdk) => {
   const composioGetToolkit = {
     name: "composio_get_toolkit",
     description:
-      "Get detailed Composio v3 toolkit metadata by toolkit slug, including auth details and versioned capability metadata.",
+      "Get detailed Composio v3.1 toolkit metadata by toolkit slug, including auth details and versioned capability metadata.",
     category: "data-bearing",
 
     parameters: {
@@ -2092,7 +2096,7 @@ export const tools = (sdk) => {
   const composioListFiles = {
     name: "composio_list_files",
     description:
-      "List files registered with Composio's v3 Files API for a toolkit/tool pair. Use before reusing uploaded files in tool parameters.",
+      "List files registered with Composio's v3.1 Files API for a toolkit/tool pair. Use before reusing uploaded files in tool parameters.",
     category: "data-bearing",
 
     parameters: {
@@ -2157,7 +2161,7 @@ export const tools = (sdk) => {
   const composioRequestFileUpload = {
     name: "composio_request_file_upload",
     description:
-      "Request a Composio v3 Files API presigned upload URL for a file that will be passed to a Composio tool.",
+      "Request a Composio v3.1 Files API presigned upload URL for a file that will be passed to a Composio tool.",
     category: "action",
     scope: "dm-only",
 
@@ -2249,7 +2253,7 @@ export const tools = (sdk) => {
   const composioListTriggerTypes = {
     name: "composio_list_trigger_types",
     description:
-      "List Composio v3 trigger type schemas by toolkit so the agent can configure automation triggers.",
+      "List Composio v3.1 trigger type schemas by toolkit so the agent can configure automation triggers.",
     category: "data-bearing",
 
     parameters: {
@@ -2326,7 +2330,7 @@ export const tools = (sdk) => {
   const composioGetTriggerType = {
     name: "composio_get_trigger_type",
     description:
-      "Get one Composio v3 trigger type schema by trigger slug before creating or updating a trigger instance.",
+      "Get one Composio v3.1 trigger type schema by trigger slug before creating or updating a trigger instance.",
     category: "data-bearing",
 
     parameters: {
@@ -2506,7 +2510,7 @@ export const tools = (sdk) => {
   const composioUpsertTrigger = {
     name: "composio_upsert_trigger",
     description:
-      "Create or update a Composio v3 trigger instance for a connected account using a trigger type slug and config.",
+      "Create or update a Composio v3.1 trigger instance for a connected account using a trigger type slug and config.",
     category: "action",
     scope: "dm-only",
 
@@ -2586,7 +2590,7 @@ export const tools = (sdk) => {
   const composioSetTriggerStatus = {
     name: "composio_set_trigger_status",
     description:
-      "Enable or disable a Composio v3 trigger instance through the trigger manage endpoint.",
+      "Enable or disable a Composio v3.1 trigger instance through the trigger manage endpoint.",
     category: "action",
     scope: "dm-only",
 
@@ -2655,7 +2659,7 @@ export const tools = (sdk) => {
 
   const composioDeleteTrigger = {
     name: "composio_delete_trigger",
-    description: "Delete a Composio v3 trigger instance by trigger ID.",
+    description: "Delete a Composio v3.1 trigger instance by trigger ID.",
     category: "action",
     scope: "dm-only",
 
@@ -2708,7 +2712,7 @@ export const tools = (sdk) => {
   const composioListWebhookEvents = {
     name: "composio_list_webhook_events",
     description:
-      "List event types supported by Composio v3 webhook subscriptions.",
+      "List event types supported by Composio v3.1 webhook subscriptions.",
     category: "data-bearing",
 
     parameters: {
@@ -2750,7 +2754,7 @@ export const tools = (sdk) => {
   const composioListWebhooks = {
     name: "composio_list_webhooks",
     description:
-      "List Composio v3 webhook subscriptions. Webhook signing secrets are redacted unless include_secret is true.",
+      "List Composio v3.1 webhook subscriptions. Webhook signing secrets are redacted unless include_secret is true.",
     category: "data-bearing",
 
     parameters: {
@@ -2815,7 +2819,7 @@ export const tools = (sdk) => {
   const composioGetWebhook = {
     name: "composio_get_webhook",
     description:
-      "Get one Composio v3 webhook subscription by ID. Webhook signing secrets are redacted unless include_secret is true.",
+      "Get one Composio v3.1 webhook subscription by ID. Webhook signing secrets are redacted unless include_secret is true.",
     category: "data-bearing",
 
     parameters: {
@@ -2868,7 +2872,7 @@ export const tools = (sdk) => {
   const composioCreateWebhook = {
     name: "composio_create_webhook",
     description:
-      "Create a Composio v3 webhook subscription for Teleton Agent automation callbacks.",
+      "Create a Composio v3.1 webhook subscription for Teleton Agent automation callbacks.",
     category: "action",
     scope: "dm-only",
 
@@ -2944,7 +2948,7 @@ export const tools = (sdk) => {
   const composioUpdateWebhook = {
     name: "composio_update_webhook",
     description:
-      "Update a Composio v3 webhook subscription URL, enabled events, or version.",
+      "Update a Composio v3.1 webhook subscription URL, enabled events, or version.",
     category: "action",
     scope: "dm-only",
 
@@ -3029,7 +3033,7 @@ export const tools = (sdk) => {
   const composioRotateWebhookSecret = {
     name: "composio_rotate_webhook_secret",
     description:
-      "Rotate a Composio v3 webhook subscription signing secret. The new secret is redacted unless include_secret is true.",
+      "Rotate a Composio v3.1 webhook subscription signing secret. The new secret is redacted unless include_secret is true.",
     category: "action",
     scope: "dm-only",
 
@@ -3083,7 +3087,7 @@ export const tools = (sdk) => {
 
   const composioDeleteWebhook = {
     name: "composio_delete_webhook",
-    description: "Delete a Composio v3 webhook subscription by ID.",
+    description: "Delete a Composio v3.1 webhook subscription by ID.",
     category: "action",
     scope: "dm-only",
 
